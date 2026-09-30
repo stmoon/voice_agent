@@ -1,0 +1,232 @@
+"""Claude Code 세션 transcript(JSONL) 파서.
+
+화면이 아니라 `~/.claude/projects/<cwd>/<session_id>.jsonl` 만으로
+세션 상태(대기/작업 중/승인 대기)와 요청별 최종 응답을 판별한다.
+
+승인 대기는 JSONL 만으로는 "도구 실행 중" 과 구분되지 않으므로,
+bridge 가 --settings 로 심은 훅(PermissionRequest/Notification)이 남기는
+사이드카 이벤트 파일(events.jsonl)을 함께 본다.
+"""
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterable
+
+IDLE = "idle"                    # 대기
+WORKING = "working"              # 작업 중
+AWAITING_APPROVAL = "awaiting_approval"  # 승인 대기
+
+DONE = "done"                    # (요청) 완료
+INTERRUPTED = "interrupted"      # (요청) 중단됨
+
+STATUS_KO = {
+    IDLE: "대기",
+    WORKING: "작업 중",
+    AWAITING_APPROVAL: "승인 대기",
+    DONE: "완료",
+    INTERRUPTED: "중단됨",
+}
+
+_END_STOP_REASONS = {"end_turn", "stop_sequence", "max_tokens", "refusal"}
+INTERRUPT_PREFIX = "[Request interrupted by user"
+
+
+def claude_config_dir() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+
+
+def find_transcript(session_id: str, config_dir: Path | None = None) -> Path | None:
+    """세션 ID 로 transcript 파일 위치를 찾는다 (프로젝트 폴더명 규칙에 의존하지 않고 탐색)."""
+    root = (config_dir or claude_config_dir()) / "projects"
+    if not root.is_dir():
+        return None
+    hits = sorted(root.glob(f"*/{session_id}.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return hits[0] if hits else None
+
+
+def read_jsonl(path: Path | None) -> list[dict]:
+    """완결된 줄만 읽는다. 기록 중인 마지막 줄(개행 없음/깨진 JSON)은 건너뛴다."""
+    if path is None or not path.exists():
+        return []
+    out: list[dict] = []
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if not line.endswith("\n"):
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return out
+
+
+# ---------- 레코드 분류 ----------
+
+def _content_blocks(rec: dict) -> list[dict]:
+    c = (rec.get("message") or {}).get("content")
+    if isinstance(c, str):
+        return [{"type": "text", "text": c}]
+    return [b for b in c or [] if isinstance(b, dict)]
+
+
+def user_text(rec: dict) -> str | None:
+    """사용자 '프롬프트' 레코드면 그 텍스트, 아니면 None (tool_result·메타·명령 출력 제외)."""
+    if rec.get("type") != "user" or rec.get("isSidechain") or rec.get("isMeta") or rec.get("isCompactSummary"):
+        return None
+    blocks = _content_blocks(rec)
+    if not blocks or any(b.get("type") == "tool_result" for b in blocks):
+        return None
+    text = "\n".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+    if text.lstrip().startswith(("<command-", "<local-command", "<bash-", "<system-reminder")):
+        return None
+    return text
+
+
+def is_interrupt(rec: dict) -> bool:
+    t = user_text(rec)
+    return t is not None and t.lstrip().startswith(INTERRUPT_PREFIX)
+
+
+def is_prompt(rec: dict) -> bool:
+    t = user_text(rec)
+    return t is not None and not t.lstrip().startswith(INTERRUPT_PREFIX)
+
+
+@dataclass
+class Turn:
+    """프롬프트 1개 ~ 다음 프롬프트 직전까지."""
+
+    prompt_index: int          # transcript 내 레코드 인덱스
+    prompt: str
+    prompt_uuid: str | None
+    records: list[dict] = field(default_factory=list)  # 프롬프트 이후 레코드
+
+    @property
+    def interrupted(self) -> bool:
+        return any(is_interrupt(r) for r in self.records)
+
+    def pending_tool_uses(self) -> list[dict]:
+        """결과(tool_result)가 아직 없는 tool_use 레코드들. [{'id','name','timestamp'}]"""
+        uses: dict[str, dict] = {}
+        done: set[str] = set()
+        for r in self.records:
+            if r.get("isSidechain"):
+                continue
+            for b in _content_blocks(r):
+                if r.get("type") == "assistant" and b.get("type") == "tool_use":
+                    uses[b.get("id")] = {"id": b.get("id"), "name": b.get("name"), "timestamp": r.get("timestamp")}
+                elif r.get("type") == "user" and b.get("type") == "tool_result":
+                    done.add(b.get("tool_use_id"))
+        return [u for k, u in uses.items() if k not in done]
+
+    def ended(self) -> bool:
+        if self.interrupted:
+            return True
+        main = [r for r in self.records if not r.get("isSidechain")]
+        if any(r.get("type") == "system" and r.get("subtype") == "turn_duration" for r in main):
+            return True
+        last_assistant = None
+        last_assistant_i = -1
+        for i, r in enumerate(main):
+            if r.get("type") == "assistant":
+                last_assistant, last_assistant_i = r, i
+        if last_assistant is None:
+            return False
+        stop = (last_assistant.get("message") or {}).get("stop_reason")
+        if stop not in _END_STOP_REASONS:
+            return False
+        # 그 뒤로 tool_result 가 이어졌다면 아직 진행 중
+        after = main[last_assistant_i + 1:]
+        return not any(r.get("type") == "user" and not is_interrupt(r) for r in after) and not self.pending_tool_uses()
+
+    def final_text(self) -> str:
+        """턴의 최종 응답: 마지막 tool_result 이후 assistant 텍스트 블록들을 이어 붙임."""
+        main = [r for r in self.records if not r.get("isSidechain")]
+        start = 0
+        for i, r in enumerate(main):
+            if r.get("type") == "user" and any(b.get("type") == "tool_result" for b in _content_blocks(r)):
+                start = i + 1
+        texts: list[str] = []
+        for r in main[start:]:
+            if r.get("type") != "assistant":
+                continue
+            for b in _content_blocks(r):
+                if b.get("type") == "text" and b.get("text"):
+                    texts.append(b["text"])
+        return "\n".join(texts).strip()
+
+    def is_error(self) -> bool:
+        """API 오류·로그인 만료 등 모델이 아닌 CLI 가 만든(<synthetic>) 응답."""
+        return any(r.get("type") == "assistant" and (r.get("isApiErrorMessage")
+                   or (r.get("message") or {}).get("model") == "<synthetic>") for r in self.records)
+
+
+def split_turns(records: list[dict]) -> list[Turn]:
+    turns: list[Turn] = []
+    for i, r in enumerate(records):
+        if is_prompt(r):
+            turns.append(Turn(i, user_text(r) or "", r.get("uuid")))
+        elif turns:
+            turns[-1].records.append(r)
+    return turns
+
+
+# ---------- 사이드카(훅) 이벤트 ----------
+
+def permission_events(events: Iterable[dict]) -> list[dict]:
+    out = []
+    for e in events:
+        name = e.get("hook_event_name")
+        if name == "PermissionRequest":
+            out.append(e)
+        elif name == "Notification":
+            kind = e.get("notification_type")
+            if kind == "permission_prompt" or (kind is None and "permission" in e.get("message", "").lower()):
+                out.append(e)
+    return out
+
+
+def _ts(s: str | None) -> float:
+    from datetime import datetime
+
+    if not s:
+        return 0.0
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def turn_state(turn: Turn, events: list[dict] | None = None) -> str:
+    if turn.ended():
+        return INTERRUPTED if turn.interrupted else DONE
+    pending = turn.pending_tool_uses()
+    if pending and events:
+        oldest = min(_ts(p["timestamp"]) for p in pending)
+        for e in permission_events(events):
+            # 훅 이벤트 시각(bridge 가 기록한 epoch)이 대기 중인 tool_use 이후면 승인 대기
+            if e.get("_ts", 0.0) >= oldest - 1.0:
+                return AWAITING_APPROVAL
+    return WORKING
+
+
+def session_status(records: list[dict], events: list[dict] | None = None) -> str:
+    turns = split_turns(records)
+    if not turns:
+        return IDLE
+    st = turn_state(turns[-1], events)
+    return IDLE if st in (DONE, INTERRUPTED) else st
+
+
+def turn_after(records: list[dict], offset: int) -> Turn | None:
+    """offset(레코드 개수) 이후 처음 시작된 턴 = bridge 가 주입한 요청의 턴."""
+    for t in split_turns(records):
+        if t.prompt_index >= offset:
+            return t
+    return None

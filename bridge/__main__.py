@@ -1,0 +1,90 @@
+"""voice-bridge CLI.
+
+    voice-bridge serve [--start 이름 ...]     MCP 서버 실행 (+ 프리셋 세션 자동 기동)
+    voice-bridge token init                   MCP 토큰 생성 → OS 보안 저장소 저장, 커넥터 URL 출력
+    voice-bridge token set-notion             노션 통합 토큰을 보안 저장소에 저장 (표준입력으로 받음)
+    voice-bridge info                         설정·호스트 정보
+"""
+from __future__ import annotations
+
+import argparse
+import getpass
+import signal
+import sys
+
+from .config import BridgeConfig, default_config_path
+
+
+def cmd_serve(args, cfg: BridgeConfig) -> int:
+    import uvicorn
+
+    from .auth import MCP_TOKEN, load_secret
+    from .mcp_server import build_app
+    from .session_manager import BridgeError, SessionManager
+
+    token = load_secret(MCP_TOKEN)  # 없으면 여기서 실패 (평문 대체 없음)
+    manager = SessionManager(cfg)
+    for name in args.start or []:
+        try:
+            s = manager.start_session(name)
+            print(f"[bridge] 세션 기동: {s.name} ({s.cwd})", file=sys.stderr)
+        except BridgeError as e:
+            print(f"[bridge] 세션 기동 실패 {name}: {e.message}", file=sys.stderr)
+    app = build_app(manager, token)
+
+    def _stop(*_):
+        manager.shutdown()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _stop)
+    try:
+        uvicorn.run(app, host=cfg.bind, port=cfg.port, log_level="info")
+    finally:
+        manager.shutdown()
+    return 0
+
+
+def cmd_token(args, cfg: BridgeConfig) -> int:
+    from .auth import NOTION_TOKEN, generate_mcp_token, store_secret
+
+    if args.action == "init":
+        tok = generate_mcp_token()
+        print("MCP 토큰을 OS 보안 저장소에 저장했습니다. 커넥터 등록용 (한 번만 표시):")
+        host = cfg.allowed_hosts[0] if cfg.allowed_hosts else f"{cfg.host_id}.bridge.<도메인>"
+        print(f"  https://{host}/t/{tok}/mcp")
+        return 0
+    if args.action == "set-notion":
+        val = getpass.getpass("노션 내부 통합 토큰: ").strip()
+        if not val:
+            print("비어 있음", file=sys.stderr)
+            return 1
+        store_secret(NOTION_TOKEN, val)
+        print("저장했습니다.")
+        return 0
+    return 1
+
+
+def cmd_info(args, cfg: BridgeConfig) -> int:
+    print(f"config    : {default_config_path()}")
+    print(f"host_id   : {cfg.host_id}")
+    print(f"listen    : {cfg.bind}:{cfg.port}")
+    print(f"presets   : {', '.join(cfg.sessions) or '(없음)'}")
+    print(f"hosts     : {', '.join(cfg.allowed_hosts) or '(없음)'}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="voice-bridge")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("serve")
+    s.add_argument("--start", action="append", help="기동할 프리셋 세션 이름 (반복 가능)")
+    t = sub.add_parser("token")
+    t.add_argument("action", choices=["init", "set-notion"])
+    sub.add_parser("info")
+    args = p.parse_args(argv)
+    cfg = BridgeConfig.load()
+    return {"serve": cmd_serve, "token": cmd_token, "info": cmd_info}[args.cmd](args, cfg)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

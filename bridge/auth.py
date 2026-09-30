@@ -1,0 +1,86 @@
+"""토큰 인증 + OS 보안 저장소 (keyring: macOS 키체인 / Windows 자격 증명 관리자 / Linux Secret Service).
+
+토큰은 평문 파일에 두지 않는다. 요청은 둘 중 하나로 인증:
+- `Authorization: Bearer <토큰>` 헤더
+- 경로 접두사 `/t/<토큰>/...`  (헤더를 넣을 수 없는 커넥터용)
+"""
+from __future__ import annotations
+
+import hmac
+import json
+import secrets
+from typing import Callable
+
+import keyring
+
+SERVICE = "voice-bridge"
+MCP_TOKEN = "mcp-token"
+NOTION_TOKEN = "notion-token"
+
+
+class TokenMissing(RuntimeError):
+    pass
+
+
+def load_secret(name: str) -> str:
+    v = keyring.get_password(SERVICE, name)
+    if not v:
+        raise TokenMissing(f"보안 저장소에 '{SERVICE}/{name}' 이 없습니다. `voice-bridge token init` 으로 등록하세요.")
+    return v
+
+
+def store_secret(name: str, value: str) -> None:
+    keyring.set_password(SERVICE, name, value)
+
+
+def generate_mcp_token() -> str:
+    tok = secrets.token_urlsafe(32)
+    store_secret(MCP_TOKEN, tok)
+    return tok
+
+
+def _eq(a: str, b: str) -> bool:
+    return hmac.compare_digest(a.encode(), b.encode())
+
+
+class TokenAuthMiddleware:
+    """ASGI 미들웨어. /healthz 외 모든 HTTP 요청에 토큰 요구, 실패 시 401."""
+
+    def __init__(self, app, token: str | Callable[[], str]):
+        self.app = app
+        self._token = token
+
+    def token(self) -> str:
+        return self._token() if callable(self._token) else self._token
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        path: str = scope.get("path", "")
+        if path == "/healthz":
+            return await _respond(send, 200, {"ok": True})
+        expected = self.token()
+        if path.startswith("/t/"):
+            _, _, rest = path.partition("/t/")
+            given, sep, tail = rest.partition("/")
+            if given and _eq(given, expected):
+                scope = dict(scope)
+                scope["path"] = "/" + tail if sep else "/"
+                scope["raw_path"] = scope["path"].encode()
+                return await self.app(scope, receive, send)
+            return await _respond(send, 401, {"error": "unauthorized"})
+        for k, v in scope.get("headers", []):
+            if k.lower() == b"authorization":
+                val = v.decode("latin-1")
+                if val.lower().startswith("bearer ") and _eq(val[7:].strip(), expected):
+                    return await self.app(scope, receive, send)
+        return await _respond(send, 401, {"error": "unauthorized"})
+
+
+async def _respond(send, status: int, body: dict) -> None:
+    data = json.dumps(body).encode()
+    headers = [(b"content-type", b"application/json"), (b"content-length", str(len(data)).encode())]
+    if status == 401:
+        headers.append((b"www-authenticate", b'Bearer realm="voice-bridge"'))
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": data})

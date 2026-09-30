@@ -1,0 +1,142 @@
+"""P2 transcript 파서 인수 테스트. 화면 없이 JSONL(+훅 사이드카)만으로 판별."""
+import json
+import shutil
+
+import pytest
+
+from bridge import transcript as tr
+from bridge.hook_sink import read_events
+from tests.conftest import FIXTURES
+
+
+def load(name):
+    recs = tr.read_jsonl(FIXTURES / f"{name}.jsonl")
+    ev = read_events(FIXTURES / f"{name}.events.jsonl")
+    return recs, ev
+
+
+# ---------- P2-1 ----------
+
+@pytest.mark.req("P2-1")
+def test_find_transcript_by_session_id(tmp_path):
+    sid = "c1c18d3b-5d92-441a-9e98-d9aa87fc1ed9"
+    proj = tmp_path / "projects" / "-Users-x-Project-voice-commander-sandbox-poc"
+    proj.mkdir(parents=True)
+    (tmp_path / "projects" / "-other").mkdir()
+    (tmp_path / "projects" / "-other" / "different.jsonl").write_text("{}\n")
+    target = proj / f"{sid}.jsonl"
+    shutil.copy(FIXTURES / "real_cli_2.1.285_synthetic_reply.jsonl", target)
+    assert tr.find_transcript(sid, tmp_path) == target
+    assert tr.find_transcript("00000000-0000-0000-0000-000000000000", tmp_path) is None
+    assert tr.find_transcript(sid, tmp_path / "nowhere") is None
+
+
+@pytest.mark.req("P2-1")
+def test_find_transcript_uses_env_config_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "projects" / "p").mkdir(parents=True)
+    f = tmp_path / "projects" / "p" / "abc.jsonl"
+    f.write_text("")
+    assert tr.find_transcript("abc") == f
+
+
+@pytest.mark.req("P2-1")
+def test_partial_last_line_is_ignored(tmp_path):
+    f = tmp_path / "t.jsonl"
+    f.write_text(json.dumps({"type": "mode"}) + "\n" + '{"type": "user", "mess')
+    assert tr.read_jsonl(f) == [{"type": "mode"}]
+
+
+# ---------- P2-2 ----------
+
+@pytest.mark.req("P2-2")
+def test_request_maps_to_its_turn_final_response():
+    recs, ev = load("fake_approved")
+    prompts = [t.prompt for t in tr.split_turns(recs)]
+    assert prompts == ["hello", "SLOW job", "PERM rm"]
+    # 요청 ID ↔ 주입 직전 레코드 수(offset) → 그 뒤 첫 턴
+    first = tr.turn_after(recs, 0)
+    assert first.prompt == "hello" and first.final_text() == "ECHO: hello"
+    slow_off = first.prompt_index + 1 + len(first.records)
+    slow = tr.turn_after(recs, slow_off)
+    assert slow.prompt == "SLOW job" and tr.turn_state(slow, ev) == tr.INTERRUPTED
+    perm = tr.turn_after(recs, slow.prompt_index + 1)
+    assert perm.prompt == "PERM rm"
+    # 최종 응답 = 마지막 tool_result 이후 텍스트 (도구 호출 전 설명문 제외)
+    assert perm.final_text() == "APPROVED"
+    assert tr.turn_state(perm, ev) == tr.DONE
+
+
+@pytest.mark.req("P2-2")
+def test_real_cli_sample_maps_prompt_and_reply():
+    recs = tr.read_jsonl(FIXTURES / "real_cli_2.1.285_synthetic_reply.jsonl")
+    t = tr.turn_after(recs, 0)
+    assert t.prompt == "Reply with exactly the word PONG and nothing else."
+    assert t.final_text() == "Login expired · Please run /login"
+    assert tr.turn_state(t) == tr.DONE
+    assert t.is_error()  # 로그인 만료 → CLI 합성 응답은 오류로 표시
+    assert tr.turn_after(recs, t.prompt_index + 1) is None
+
+
+@pytest.mark.req("P2-2")
+def test_assistant_blocks_split_across_lines_are_joined():
+    recs = [
+        {"type": "user", "message": {"role": "user", "content": "q"}, "uuid": "u1"},
+        {"type": "assistant", "message": {"id": "m1", "content": [{"type": "thinking", "thinking": ""}], "stop_reason": None}},
+        {"type": "assistant", "message": {"id": "m1", "content": [{"type": "text", "text": "첫 줄"}], "stop_reason": None}},
+        {"type": "assistant", "message": {"id": "m1", "content": [{"type": "text", "text": "둘째 줄"}], "stop_reason": "end_turn"}},
+    ]
+    t = tr.turn_after(recs, 0)
+    assert t.final_text() == "첫 줄\n둘째 줄"
+    assert tr.turn_state(t) == tr.DONE
+
+
+# ---------- P2-3 ----------
+
+@pytest.mark.req("P2-3")
+@pytest.mark.parametrize("name,expected", [
+    ("real_cli_2.1.285_synthetic_reply", tr.IDLE),
+    ("fake_done", tr.IDLE),
+    ("fake_working", tr.WORKING),
+    ("fake_interrupted", tr.IDLE),
+    ("fake_awaiting_approval", tr.AWAITING_APPROVAL),
+    ("fake_approved", tr.IDLE),
+])
+def test_status_from_recorded_samples(name, expected):
+    recs, ev = load(name)
+    assert tr.session_status(recs, ev) == expected
+
+
+@pytest.mark.req("P2-3")
+def test_pending_tool_without_permission_event_is_working():
+    recs, _ = load("fake_awaiting_approval")
+    assert tr.session_status(recs, []) == tr.WORKING
+
+
+@pytest.mark.req("P2-3")
+def test_old_permission_event_does_not_mark_new_tool_as_awaiting():
+    recs, ev = load("fake_awaiting_approval")
+    old = [dict(e, _ts=e["_ts"] - 3600) for e in ev]
+    assert tr.session_status(recs, old) == tr.WORKING
+
+
+@pytest.mark.req("P2-3")
+def test_empty_transcript_is_idle():
+    assert tr.session_status([], []) == tr.IDLE
+
+
+@pytest.mark.req("P2-3")
+def test_prompt_without_reply_is_working():
+    recs = [{"type": "user", "message": {"role": "user", "content": "q"}}]
+    assert tr.session_status(recs) == tr.WORKING
+
+
+@pytest.mark.req("P2-3")
+def test_meta_and_command_records_are_not_prompts():
+    recs = [
+        {"type": "user", "isMeta": True, "message": {"role": "user", "content": "caveat"}},
+        {"type": "user", "message": {"role": "user", "content": "<command-name>/model</command-name>"}},
+        {"type": "user", "message": {"role": "user", "content": "<local-command-stdout>x</local-command-stdout>"}},
+    ]
+    assert tr.split_turns(recs) == []
+    assert tr.session_status(recs) == tr.IDLE
