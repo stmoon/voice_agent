@@ -62,6 +62,9 @@ class Session:
     warning: str | None = None
     _transcript: Path | None = None
     inflight: Request | None = None  # 주입했지만 아직 transcript 에 프롬프트가 안 보인 요청
+    last_inject: float = 0.0
+    quiet_window: float = 4.0
+    quiet_rate: float = 150.0
 
     def transcript_path(self) -> Path | None:
         if self._transcript is None or not self._transcript.exists():
@@ -73,6 +76,30 @@ class Session:
 
     def events(self) -> list[dict]:
         return read_events(self.events_file)
+
+    # ---- 상태 판별 ----
+    def quiet(self) -> bool:
+        """TUI 가 조용한가: 스피너가 안 돌고(출력 거의 없음) transcript 도 그대로이며 방금 주입하지 않았음."""
+        now = time.time()
+        if now - self.last_inject < self.quiet_window:
+            return False
+        if self.proc.output_rate(self.quiet_window) >= self.quiet_rate:
+            return False
+        p = self.transcript_path()
+        try:
+            if p is not None and now - p.stat().st_mtime < self.quiet_window:
+                return False
+        except OSError:
+            pass
+        return True
+
+    def turn_state(self, turn: tr.Turn, events: list[dict], is_last: bool) -> str:
+        st = tr.turn_state(turn, events)
+        # 생각 중 Esc 중단은 transcript 에 흔적이 없다(실측). 마지막 턴이 끝나지 않았는데 TUI 가 조용하면 중단으로 본다.
+        # 단, 결과 없는 tool_use 가 있으면(도구 실행 중이거나 권한 대화상자가 떠 있을 수 있음) 절대 적용하지 않는다.
+        if st == tr.WORKING and is_last and not turn.pending_tool_uses() and self.quiet():
+            return tr.INTERRUPTED
+        return st
 
     def status(self) -> str:
         if self.failure:
@@ -86,7 +113,19 @@ class Session:
             if tr.turn_after(records, self.inflight.offset) is None:
                 return tr.WORKING
             self.inflight = None
-        return tr.session_status(records, self.events())
+        turns = tr.split_turns(records)
+        if not turns:
+            return tr.IDLE
+        st = self.turn_state(turns[-1], self.events(), is_last=True)
+        return tr.IDLE if st in (tr.DONE, tr.INTERRUPTED) else st
+
+    def prompt_box_ready(self) -> bool:
+        """안전장치: 화면 맨 뒤가 입력 대기 안내('? for shortcuts')인지. 권한·확인 대화상자가 떠 있으면 False.
+        대화상자에 명령+Enter 를 넣으면 기본 선택(승인)이 눌릴 수 있으므로 주입 전에 반드시 확인한다."""
+        scr = "".join(self.proc.screen().split()).lower()
+        idle_at = scr.rfind("forshortcuts")
+        dialog_at = max(scr.rfind(k) for k in _DIALOG_MARKERS)
+        return idle_at >= 0 and idle_at > dialog_at
 
     def info(self) -> dict:
         st = self.status()
@@ -98,6 +137,8 @@ class Session:
             "status_ko": STATUS_KO.get(st, st),
             "session_id": self.session_id,
         }
+        url = tr.rc_url(self.records())
+        d["rc_url"] = url  # None 이면 RC 미연결 (Code 탭에 안 보임)
         if self.failure:
             d["failure"] = self.failure
         if self.warning:
@@ -150,7 +191,8 @@ class SessionManager:
                 extra_env["CLAUDE_CONFIG_DIR"] = str(self.config.claude_config_dir)
             proc = PtyProcess(argv, cwd=cwd, env=child_env(extra_env))
             s = Session(name=name, cwd=cwd, host=self.config.host_id, session_id=sid, proc=proc,
-                        events_file=events_file, config_dir=self.config.claude_config_dir)
+                        events_file=events_file, config_dir=self.config.claude_config_dir,
+                        quiet_window=self.config.quiet_window, quiet_rate=self.config.quiet_rate)
             self._sessions[name] = s
         if wait:
             self.wait_ready(s)
@@ -244,11 +286,19 @@ class SessionManager:
             if st != tr.IDLE:
                 raise BridgeError("busy", f"'{s.name}' 세션이 {STATUS_KO.get(st, st)} 상태라 명령을 넣지 않았습니다.",
                                   session=s.info())
-            offset = len(s.records())
-            req = Request(id=uuid.uuid4().hex[:12], session_name=s.name, text=text, offset=offset, sent_at=time.time())
+            if not s.prompt_box_ready():
+                raise BridgeError("not_at_prompt", f"'{s.name}' 세션 화면에 확인·권한 대화상자가 떠 있어 명령을 넣지 않았습니다. "
+                                  "Code 탭에서 확인해 주세요.", session=s.info())
+            records = s.records()
+            turns = tr.split_turns(records)
+            # 중단된 프롬프트가 입력창에 되돌아와 있을 수 있으니 그 줄 수보다 넉넉히 지운다
+            clear_lines = max(8, (turns[-1].prompt.count("\n") + 4) if turns else 0)
+            req = Request(id=uuid.uuid4().hex[:12], session_name=s.name, text=text, offset=len(records),
+                          sent_at=time.time())
             s.inflight = req
+            s.last_inject = req.sent_at
             self._requests[req.id] = req
-            s.proc.send_prompt(text)
+            s.proc.send_prompt(text, clear_lines=clear_lines)
         return {"ok": True, "request_id": req.id, "session": s.name, "status": tr.WORKING,
                 "status_ko": STATUS_KO[tr.WORKING]}
 
@@ -268,8 +318,12 @@ class SessionManager:
             if time.time() - req.sent_at > self.config.inject_ack_timeout:
                 raise BridgeError("inject_unconfirmed", "명령을 넣었지만 transcript 에 기록되지 않았습니다. Code 탭에서 확인해 주세요.")
             return {**base, "status": tr.WORKING, "status_ko": STATUS_KO[tr.WORKING]}
-        st = tr.turn_state(turn, s.events())
+        turns = tr.split_turns(records)
+        st = s.turn_state(turn, s.events(), is_last=bool(turns) and turns[-1].prompt_index == turn.prompt_index)
         d = {**base, "status": st, "status_ko": STATUS_KO[st]}
+        if " ".join(turn.prompt.split()) != " ".join(req.text.split()):
+            d["prompt_mismatch"] = True  # 기록된 프롬프트가 보낸 것과 다름 (입력창 잔여물 등)
+            d["recorded_prompt"] = turn.prompt
         if st in (tr.DONE, tr.INTERRUPTED):
             d["response"] = turn.final_text()
             if turn.is_error():
@@ -291,6 +345,8 @@ class SessionManager:
             s.proc.send_escape()
         return {"ok": True, "session": s.name, "message": "중단 신호(Esc)를 보냈습니다."}
 
+
+_DIALOG_MARKERS = ("doyouwanttoproceed", "doyouwanttomake", "doyouwanttocreate", "entertoconfirm", "esctocancel")
 
 _TRUST_MSG = "폴더 신뢰가 필요합니다. 해당 폴더에서 claude 를 한 번 직접 실행해 신뢰해 주세요: {cwd}"
 

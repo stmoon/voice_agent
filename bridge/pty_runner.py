@@ -12,10 +12,13 @@ import re
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 ESC = "\x1b"
 ENTER = "\r"
+CTRL_U = "\x15"      # 커서 앞 줄 지우기
+BACKSPACE = "\x7f"
 PASTE_BEGIN = "\x1b[200~"
 PASTE_END = "\x1b[201~"
 
@@ -64,6 +67,8 @@ class PtyProcess:
         self._lock = threading.Lock()
         self._tail = ""
         self._seq = 0  # 지금까지 받은 문자 수 (since() 용)
+        self._activity: deque[tuple[float, int]] = deque(maxlen=4096)  # (시각, 받은 문자 수)
+        self.started_at = time.time()
         self._impl = _WinPty(self) if sys.platform == "win32" else _PosixPty(self)
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
@@ -77,6 +82,14 @@ class PtyProcess:
             with self._lock:
                 self._tail = (self._tail + chunk)[-self.tail_limit:]
                 self._seq += len(chunk)
+                self._activity.append((time.time(), len(chunk)))
+
+    def output_rate(self, window: float) -> float:
+        """최근 window 초 동안 초당 출력 문자 수. 작업 중엔 스피너가 계속 다시 그려져 수백/초, 대기 중엔 거의 0."""
+        cutoff = time.time() - window
+        with self._lock:
+            n = sum(c for t, c in self._activity if t >= cutoff)
+        return n / window
 
     def mark(self) -> int:
         with self._lock:
@@ -97,8 +110,19 @@ class PtyProcess:
     def write(self, data: str) -> None:
         self._impl.write(data)
 
-    def send_prompt(self, text: str) -> None:
-        """프롬프트 입력 + 제출. 여러 줄이면 bracketed paste 로 넣어 중간 줄바꿈이 제출되지 않게 한다."""
+    def clear_input(self, lines: int = 8) -> None:
+        """입력창 비우기. 생각 중 Esc 로 중단하면 claude 가 이전 프롬프트를 입력창에 되돌려 놓으므로,
+        그냥 타이핑하면 새 명령이 뒤에 이어 붙는다(실측). (Ctrl+U, Backspace) 반복으로 여러 줄까지 지운다.
+        빈 입력에서는 아무 효과 없음(실측). Esc 두 번은 빈 입력에서 되감기 메뉴를 열어 쓰지 않는다."""
+        for _ in range(lines):
+            self.write(CTRL_U + BACKSPACE)
+            time.sleep(0.05)
+        self.write(CTRL_U)
+        time.sleep(0.2)
+
+    def send_prompt(self, text: str, clear_lines: int = 8) -> None:
+        """입력창을 비운 뒤 프롬프트 입력 + 제출. 여러 줄이면 bracketed paste 로 넣어 중간 줄바꿈이 제출되지 않게 한다."""
+        self.clear_input(clear_lines)
         if "\n" in text:
             self.write(PASTE_BEGIN + text + PASTE_END)
         else:

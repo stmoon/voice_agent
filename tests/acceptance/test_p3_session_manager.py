@@ -1,4 +1,6 @@
 """P3 세션 관리자 인수 테스트 (가짜 claude 사용)."""
+import time
+
 import pytest
 
 from bridge import transcript as tr
@@ -130,3 +132,60 @@ def test_forbidden_extra_args_rejected(fake_config):
         BridgeConfig(claude_extra_args=["--dangerously-skip-permissions"])
     with pytest.raises(ValueError):
         BridgeConfig(claude_extra_args=["--permission-mode=bypassPermissions"])
+
+
+def _status_is(manager, name, st):
+    return manager.get(name).status() == st
+
+
+@pytest.mark.req("P3-3")
+def test_interrupt_while_thinking_then_next_command_is_clean(manager):
+    """실측: 생각 중 Esc 는 기록을 남기지 않고 프롬프트를 입력창에 되돌린다.
+    → 조용해지면 대기로 판정, 다음 명령은 입력창을 비운 뒤 넣어 이어 붙지 않아야 한다."""
+    s = manager.start_session("테스트 세션")
+    manager.select_session("테스트 세션")
+    r = manager.send_command("THINK hard about it")
+    assert wait_until(lambda: manager.get_result(r["request_id"])["status"] == tr.WORKING)
+    with pytest.raises(BridgeError):
+        manager.send_command("too early")
+    manager.interrupt()
+    assert wait_until(lambda: _status_is(manager, "테스트 세션", tr.IDLE), timeout=15)
+    assert manager.get_result(r["request_id"])["status"] == tr.INTERRUPTED
+    r2 = manager.send_command("next one")
+    done = wait_until(lambda: _done(manager, r2["request_id"]))
+    assert done["response"] == "ECHO: next one" and "prompt_mismatch" not in done
+    assert [t.prompt for t in tr.split_turns(s.records())] == ["THINK hard about it", "next one"]
+    # 앞 요청은 다음 프롬프트로 대체되어도 계속 '중단됨'
+    assert manager.get_result(r["request_id"])["status"] == tr.INTERRUPTED
+
+
+@pytest.mark.req("P3-3")
+def test_restored_multiline_prompt_is_cleared(manager):
+    s = manager.start_session("테스트 세션")
+    manager.select_session("테스트 세션")
+    r = manager.send_command("THINK\n둘째 줄\n셋째 줄")
+    assert wait_until(lambda: manager.get_result(r["request_id"])["status"] == tr.WORKING)
+    manager.interrupt()
+    assert wait_until(lambda: _status_is(manager, "테스트 세션", tr.IDLE), timeout=15)
+    r2 = manager.send_command("clean")
+    assert wait_until(lambda: _done(manager, r2["request_id"]))["response"] == "ECHO: clean"
+
+
+@pytest.mark.req("P3-3")
+def test_static_permission_dialog_is_never_mistaken_for_idle(manager, monkeypatch):
+    """권한 대화상자는 화면이 정적이라 '조용함'이지만, 결과 없는 tool_use 가 있으면 대기로 보지 않는다.
+    (훅 이벤트가 없어도) 여기에 명령+Enter 를 넣으면 승인이 눌릴 수 있다."""
+    monkeypatch.setenv("FAKE_NO_PERM_HOOKS", "1")
+    s = manager.start_session("테스트 세션")
+    manager.select_session("테스트 세션")
+    r = manager.send_command("PERM rm")
+    time.sleep(s.quiet_window + 2)
+    assert s.quiet()  # 화면은 조용하다
+    assert s.status() == tr.WORKING
+    assert not s.prompt_box_ready()
+    with pytest.raises(BridgeError) as e:
+        manager.send_command("y")
+    assert e.value.code == "busy"
+    s.proc.write("y")  # 사람이 승인
+    assert wait_until(lambda: _done(manager, r["request_id"]))["response"] == "APPROVED"
+    assert s.prompt_box_ready()

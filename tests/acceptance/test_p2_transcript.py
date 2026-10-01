@@ -140,3 +140,45 @@ def test_meta_and_command_records_are_not_prompts():
     ]
     assert tr.split_turns(recs) == []
     assert tr.session_status(recs) == tr.IDLE
+
+
+# ---------- 실측 샘플 (CLI 2.1.285, 로그인 후 녹화) ----------
+
+@pytest.mark.req("P2-2")
+def test_real_done_turn_maps_to_reply():
+    recs = tr.read_jsonl(FIXTURES / "real_2.1.285_pong_done.jsonl")
+    t = tr.turn_after(recs, 0)
+    assert t.prompt == "Reply with exactly the word PONG and nothing else."
+    assert tr.turn_state(t) == tr.DONE and t.final_text() == "PONG" and not t.is_error()
+    assert tr.rc_url(recs) == "https://claude.ai/code/session_REDACTED"
+
+
+@pytest.mark.req("P2-3")
+def test_real_interrupt_while_thinking_leaves_no_marker_but_is_superseded():
+    """생각 중 Esc → transcript 에 흔적 없음. 다음 프롬프트가 오면 앞 턴은 중단으로 본다."""
+    recs = tr.read_jsonl(FIXTURES / "real_2.1.285_interrupt_while_thinking.jsonl")
+    first, second = tr.split_turns(recs)
+    assert not any(tr.is_interrupt(r) for r in first.records)  # 실제로 표시가 없다
+    assert first.superseded and tr.turn_state(first) == tr.INTERRUPTED
+    assert tr.turn_state(second) == tr.DONE and second.final_text() == "PONG"
+    # 입력창 잔여물 때문에 이어 붙은 프롬프트(버그 재현 기록) — bridge 는 이제 주입 전에 입력창을 비운다
+    assert second.prompt.startswith(first.prompt) and second.prompt.endswith("Reply with exactly the word PONG and nothing else.")
+    assert tr.session_status(recs) == tr.IDLE
+
+
+@pytest.mark.req("P2-3")
+def test_real_interrupt_while_streaming_has_marker_and_partial_text():
+    recs = tr.read_jsonl(FIXTURES / "real_2.1.285_interrupt_while_streaming.jsonl")
+    done, cut = tr.split_turns(recs)
+    assert tr.turn_state(done) == tr.DONE and done.final_text() == "L3"
+    assert tr.turn_state(cut) == tr.INTERRUPTED
+    assert cut.final_text().startswith("1\n2\n3")
+    assert tr.session_status(recs) == tr.IDLE
+
+
+@pytest.mark.req("P2-3")
+def test_last_unfinished_turn_without_marker_is_working_in_pure_parser():
+    """파서 단독으론 마지막 미완료 턴을 작업 중으로 둔다 (조용함 판정은 세션 관리자가 PTY 활동으로 보완)."""
+    recs = tr.read_jsonl(FIXTURES / "real_2.1.285_interrupt_while_thinking.jsonl")
+    first_only = recs[: tr.split_turns(recs)[1].prompt_index]
+    assert tr.session_status(first_only) == tr.WORKING

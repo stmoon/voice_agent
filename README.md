@@ -61,6 +61,22 @@ allowed_hosts = ["macmini.bridge.example.com"]
 - **세션 시작 방식(P3-4)**: `start_session(name)` 을 제공하되 **config 에 등록된 프리셋 이름만** 허용
   (음성 경로로 임의 폴더 지정 불가). 로컬에서는 `serve --start` 로도 기동.
 - **여러 줄 명령**: bracketed paste 로 넣어 중간 줄바꿈이 제출되지 않게 한다.
+- **중단(Esc) 동작 — 실측 2.1.285**:
+  - 응답 출력 도중 중단 → 부분 응답 + `[Request interrupted by user]` 가 transcript 에 남는다.
+  - **생각 중(출력 전) 중단 → transcript 에 아무것도 남지 않고, 프롬프트가 입력창에 되돌아온다.**
+    그냥 다음 명령을 타이핑하면 되돌아온 문장 뒤에 이어 붙어 **중단한 명령이 다시 실행된다**(실측으로 재현).
+  - 대응 1: 주입 전에 항상 입력창을 비운다 — `(Ctrl+U, Backspace)` 반복. 빈 입력·한 줄·여러 줄·화면 폭을 넘는 줄 모두
+    실측 확인. Esc 한 번은 안 지워지고, Esc 두 번은 빈 입력에서 되감기 메뉴를 열어 쓰지 않는다.
+  - 대응 2: 끝나지 않은 턴 뒤에 다음 프롬프트가 오면 그 턴은 '중단됨'.
+  - 대응 3: 마지막 턴이 끝나지 않았는데 TUI 가 조용하면(4초간 출력 150자/초 미만, transcript 변화 없음) '중단됨'.
+    실측 출력량: 작업 중 500~1100자/초(스피너), 대기 0~50자/초. **결과 없는 tool_use 가 있으면 이 규칙을 쓰지 않는다**
+    (권한 대화상자도 화면이 정적이라 조용하다).
+- **주입 안전장치**: 화면 맨 뒤가 입력 대기 안내(`? for shortcuts`)가 아니고 확인·권한 대화상자(`Do you want to proceed?`,
+  `Esc to cancel` 등)가 떠 있으면 주입을 거부한다(`not_at_prompt`). 대화상자에 명령+Enter 가 들어가면 기본 선택(승인)이
+  눌릴 수 있기 때문.
+- **RC 연결 확인**: RC 가 붙으면 CLI 가 transcript 에 `system/bridge_status` 레코드로 Code 탭 세션 URL 을 남긴다.
+  `list_sessions` 가 이를 `rc_url` 로 돌려준다 (`null` 이면 RC 미연결).
+- **기록된 프롬프트 검증**: `get_result` 는 transcript 에 기록된 프롬프트가 보낸 것과 다르면 `prompt_mismatch` 를 표시한다.
 - **요청 ↔ 턴 매핑**: 주입 직전 transcript 레코드 수(offset)를 요청에 저장, 그 뒤 처음 시작된 턴이 해당 요청.
   대기 상태에서만 주입하므로 모호하지 않다.
 

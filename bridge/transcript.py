@@ -106,10 +106,15 @@ class Turn:
     prompt: str
     prompt_uuid: str | None
     records: list[dict] = field(default_factory=list)  # 프롬프트 이후 레코드
+    superseded: bool = False  # 뒤에 다른 프롬프트가 이어짐
 
     @property
     def interrupted(self) -> bool:
-        return any(is_interrupt(r) for r in self.records)
+        """명시적 중단 표시가 있거나, 끝나지 않은 채 다음 프롬프트가 들어온 턴.
+        (생각 중 Esc 중단은 transcript 에 아무것도 남기지 않는다 — 실측 2.1.285)"""
+        if any(is_interrupt(r) for r in self.records):
+            return True
+        return self.superseded and not self._completed()
 
     def pending_tool_uses(self) -> list[dict]:
         """결과(tool_result)가 아직 없는 tool_use 레코드들. [{'id','name','timestamp'}]"""
@@ -126,8 +131,9 @@ class Turn:
         return [u for k, u in uses.items() if k not in done]
 
     def ended(self) -> bool:
-        if self.interrupted:
-            return True
+        return self.interrupted or self._completed()
+
+    def _completed(self) -> bool:
         main = [r for r in self.records if not r.get("isSidechain")]
         if any(r.get("type") == "system" and r.get("subtype") == "turn_duration" for r in main):
             return True
@@ -171,6 +177,8 @@ def split_turns(records: list[dict]) -> list[Turn]:
     turns: list[Turn] = []
     for i, r in enumerate(records):
         if is_prompt(r):
+            if turns:
+                turns[-1].superseded = True
             turns.append(Turn(i, user_text(r) or "", r.get("uuid")))
         elif turns:
             turns[-1].records.append(r)
@@ -222,6 +230,14 @@ def session_status(records: list[dict], events: list[dict] | None = None) -> str
         return IDLE
     st = turn_state(turns[-1], events)
     return IDLE if st in (DONE, INTERRUPTED) else st
+
+
+def rc_url(records: list[dict]) -> str | None:
+    """Remote Control 이 붙으면 CLI 가 system/bridge_status 레코드에 Code 탭 세션 URL 을 남긴다 (실측 2.1.285)."""
+    for r in reversed(records):
+        if r.get("type") == "system" and r.get("subtype") == "bridge_status" and r.get("url"):
+            return r["url"]
+    return None
 
 
 def turn_after(records: list[dict], offset: int) -> Turn | None:

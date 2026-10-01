@@ -5,8 +5,14 @@
 - `--session-id` 로 받은 ID 로 $CLAUDE_CONFIG_DIR/projects/<cwd>/<id>.jsonl 에 기록
 - `--settings` 의 훅(command)을 이벤트마다 실행
 - 대기 시 화면에 "? for shortcuts", 대화상자는 "Enter to confirm · Esc to cancel"
-- 프롬프트 규칙: SLOW → 도구 실행 중(ESC 로 중단), PERM → 권한 요청 후 'y' 입력 대기, 그 외 → 즉시 응답
-환경변수 FAKE_DIALOG=1 이면 기동 시 온보딩 대화상자, FAKE_TRUST=1 이면 폴더 신뢰 대화상자.
+- 작업 중엔 스피너를 계속 다시 그린다(출력 수백 자/초), 대기 중엔 출력 없음
+- 프롬프트 규칙:
+    SLOW  → 도구 실행 중 (Esc: tool_result 오류 + "[Request interrupted by user]" 기록)
+    THINK → 생각 중 (Esc: transcript 에 아무것도 안 남기고 프롬프트를 입력창에 되돌림 — 실측 2.1.285 동작)
+    PERM  → 권한 요청 후 'y' 입력 대기 (대화상자는 정적: 출력 없음)
+    그 외 → 즉시 응답 "ECHO: <프롬프트>"
+- 입력창: Ctrl+U = 현재 줄 지우기, Backspace = 한 글자 지우기, bracketed paste 의 줄바꿈은 제출 아님
+환경변수 FAKE_DIALOG=1 기동 시 온보딩 대화상자, FAKE_TRUST=1 폴더 신뢰 대화상자, FAKE_NO_PERM_HOOKS=1 권한 훅 미발생.
 """
 import json
 import os
@@ -85,10 +91,17 @@ def read_key(timeout):
     return os.read(sys.stdin.fileno(), 4096).decode("utf-8", "replace")
 
 
-def wait_key(accept, seconds):
+SPIN = "✻✶✳✢·"
+
+
+def wait_key(accept, seconds, spinner=False):
     end = time.time() + seconds
+    i = 0
     while time.time() < end:
-        k = read_key(0.2)
+        if spinner:
+            i += 1
+            out(f"\r\x1b[2K{SPIN[i % len(SPIN)]} Thinking… ({i // 10}s · esc to interrupt)")
+        k = read_key(0.1 if spinner else 0.2)
         if k is None:
             continue
         for ch in accept:
@@ -110,13 +123,19 @@ def dialog(text):
 
 
 def run_prompt(text):
+    """반환값: 입력창에 되돌려 놓을 텍스트 (THINK 중단 시)."""
     rec({"type": "user", "message": {"role": "user", "content": text}, "promptId": str(uuid.uuid4())})
     hook("UserPromptSubmit", prompt=text)
-    if "SLOW" in text:
+    if "THINK" in text:
+        if wait_key(["\x1b"], 30, spinner=True):
+            out("\r\n")
+            return text  # 기록 없음 + 프롬프트 복원
+        assistant([{"type": "text", "text": "THOUGHT"}], "end_turn")
+    elif "SLOW" in text:
         tid = "toolu_" + uuid.uuid4().hex[:8]
         assistant([{"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": "sleep 30"}}], "tool_use")
         out("\r\n⏺ Bash(sleep 30)  esc to interrupt\r\n")
-        if wait_key(["\x1b"], 30):
+        if wait_key(["\x1b"], 30, spinner=True):
             rec({"type": "user", "message": {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": tid, "content": "interrupted", "is_error": True}]}})
             rec({"type": "user", "message": {"role": "user", "content": [
@@ -129,8 +148,10 @@ def run_prompt(text):
         tid = "toolu_" + uuid.uuid4().hex[:8]
         assistant([{"type": "text", "text": "파일을 지우겠습니다."},
                    {"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": "rm x"}}], "tool_use")
-        hook("PermissionRequest", tool_name="Bash", tool_input={"command": "rm x"})
-        hook("Notification", message="Claude needs your permission to use Bash", notification_type="permission_prompt")
+        if os.environ.get("FAKE_NO_PERM_HOOKS") != "1":
+            hook("PermissionRequest", tool_name="Bash", tool_input={"command": "rm x"})
+            hook("Notification", message="Claude needs your permission to use Bash",
+                 notification_type="permission_prompt")
         out("\r\nDo you want to proceed?\r\n❯ 1. Yes\r\n  2. No\r\n\r\nEsc to cancel\r\n")
         k = wait_key(["y", "\x1b"], 60)
         if k == "y":
@@ -147,6 +168,7 @@ def run_prompt(text):
         assistant([{"type": "thinking", "thinking": ""}, {"type": "text", "text": "ECHO: " + text}], "end_turn")
     rec({"type": "system", "subtype": "turn_duration", "durationMs": 5})
     hook("Stop")
+    return ""
 
 
 def main():
@@ -171,12 +193,20 @@ def main():
             k = k.replace("\x1b[200~", "").replace("\x1b[201~", "")
             if k == "\x1b":
                 continue
-            buf += k
-            if "\r" in buf:
-                text, _, buf = buf.partition("\r")
-                if text.strip():
-                    run_prompt(text.strip())
-                idle_screen()
+            for ch in k:
+                if ch == "\x15":            # Ctrl+U: 현재 줄(마지막 줄바꿈 뒤) 지우기
+                    buf = buf[: buf.rfind("\n") + 1] if "\n" in buf else ""
+                elif ch == "\x7f":          # Backspace
+                    buf = buf[:-1]
+                elif ch == "\r":
+                    text, buf = buf, ""
+                    if text.strip():
+                        buf = run_prompt(text.strip())
+                    idle_screen()
+                    if buf:
+                        out(f"❯ {buf}")
+                else:
+                    buf += ch
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
