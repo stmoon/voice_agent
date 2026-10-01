@@ -52,8 +52,11 @@ def cmd_serve(args, cfg: BridgeConfig) -> int:
         logging.getLogger(name).addFilter(RedactTokenFilter())
     try:
         uvicorn.Server(config).run()
+    except KeyboardInterrupt:
+        pass
     finally:
         manager.shutdown()
+        print("[bridge] 종료 (세션 정리 완료)", file=sys.stderr)
     return 0
 
 
