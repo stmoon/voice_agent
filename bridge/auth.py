@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
+import re
 import secrets
 from typing import Callable
 
@@ -37,6 +39,25 @@ def generate_mcp_token() -> str:
     tok = secrets.token_urlsafe(32)
     store_secret(MCP_TOKEN, tok)
     return tok
+
+
+_PATH_TOKEN_RE = re.compile(r"/t/[^/?#\s]+")
+
+
+def redact_path(path: str) -> str:
+    """로그용: 경로의 토큰(/t/<토큰>/...)을 가린다."""
+    return _PATH_TOKEN_RE.sub("/t/***", path)
+
+
+class RedactTokenFilter(logging.Filter):
+    """uvicorn 접속 로그에 경로 토큰이 찍히지 않게 한다. args = (client, method, path, http_ver, status)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(redact_path(a) if isinstance(a, str) else a for a in record.args)
+        elif isinstance(record.msg, str):
+            record.msg = redact_path(record.msg)
+        return True
 
 
 def _eq(a: str, b: str) -> bool:

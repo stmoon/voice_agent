@@ -124,3 +124,59 @@ def test_serve_refuses_to_start_without_stored_token(tmp_path):
     env = {**os.environ, "VC_CONFIG": str(tmp_path / "none.toml"), "HOME": str(tmp_path)}
     r = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True, timeout=30)
     assert r.returncode == 3, r.stdout + r.stderr
+
+
+@pytest.mark.req("P5-2")
+def test_access_log_redacts_path_token():
+    import logging
+
+    assert auth.redact_path("/t/abc-DEF_123/mcp") == "/t/***/mcp"
+    assert auth.redact_path("/t/abc?x=1") == "/t/***?x=1"
+    assert auth.redact_path("/mcp") == "/mcp"
+    rec = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d',
+                            ("1.2.3.4:0", "POST", "/t/SECRETTOKEN/mcp", "1.1", 200), None)
+    auth.RedactTokenFilter().filter(rec)
+    assert "SECRETTOKEN" not in rec.getMessage() and "/t/***/mcp" in rec.getMessage()
+
+
+@pytest.mark.req("P5-2")
+def test_serve_access_log_has_no_token(tmp_path):
+    """실제 serve 경로(uvicorn 로깅 설정 이후 필터 부착)에서 토큰이 로그에 안 찍히는지."""
+    import socket
+    import time as _t
+
+    import httpx
+
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+    cfg = tmp_path / "c.toml"
+    cfg.write_text(f"port = {port}\n")
+    code = (
+        "import keyring\n"
+        "from keyring.backend import KeyringBackend\n"
+        "class M(KeyringBackend):\n"
+        "    priority = 1\n"
+        "    def get_password(self, s, u): return 'LOGSECRET123'\n"
+        "    def set_password(self, *a): pass\n"
+        "    def delete_password(self, *a): pass\n"
+        "keyring.set_keyring(M())\n"
+        "from bridge.__main__ import main\n"
+        "main(['serve'])\n"
+    )
+    env = {**os.environ, "VC_CONFIG": str(cfg)}
+    p = subprocess.Popen([sys.executable, "-c", code], cwd=ROOT, env=env, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, text=True)
+    try:
+        for _ in range(100):
+            try:
+                if httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=1).status_code == 200:
+                    break
+            except httpx.HTTPError:
+                _t.sleep(0.1)
+        r = httpx.post(f"http://127.0.0.1:{port}/t/LOGSECRET123/mcp", json=INIT, headers=HDR, timeout=5)
+        assert r.status_code == 200
+        _t.sleep(0.5)
+    finally:
+        p.terminate()
+        out, _ = p.communicate(timeout=10)
+    assert "/t/***/mcp" in out, out
+    assert "LOGSECRET123" not in out

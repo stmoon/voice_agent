@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import logging
 import signal
 import sys
 
@@ -18,7 +19,7 @@ from .config import BridgeConfig, default_config_path
 def cmd_serve(args, cfg: BridgeConfig) -> int:
     import uvicorn
 
-    from .auth import MCP_TOKEN, load_secret
+    from .auth import MCP_TOKEN, RedactTokenFilter, load_secret
     from .mcp_server import build_app
     from .session_manager import BridgeError, SessionManager
 
@@ -30,6 +31,9 @@ def cmd_serve(args, cfg: BridgeConfig) -> int:
             print(f"[bridge] 세션 기동: {s.name} ({s.cwd})", file=sys.stderr)
         except BridgeError as e:
             print(f"[bridge] 세션 기동 실패 {name}: {e.message}", file=sys.stderr)
+            if e.code == "unknown_preset":
+                print(f"[bridge] 등록된 프리셋: {', '.join(cfg.sessions) or '(없음)'}  — 설정: {default_config_path()}",
+                      file=sys.stderr)
     app = build_app(manager, token)
 
     def _stop(*_):
@@ -37,8 +41,12 @@ def cmd_serve(args, cfg: BridgeConfig) -> int:
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, _stop)
+    # Config 생성 시점에 uvicorn 이 로깅을 설정하므로 그 뒤에 토큰 가림 필터를 붙인다
+    config = uvicorn.Config(app, host=cfg.bind, port=cfg.port, log_level="info")
+    for name in ("uvicorn.access", "uvicorn.error"):
+        logging.getLogger(name).addFilter(RedactTokenFilter())
     try:
-        uvicorn.run(app, host=cfg.bind, port=cfg.port, log_level="info")
+        uvicorn.Server(config).run()
     finally:
         manager.shutdown()
     return 0
