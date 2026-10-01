@@ -4,6 +4,7 @@
 
     host_id = "macmini"          # 생략 시 호스트명
     port = 8765
+    autostart = ["로그 플랫폼"]   # serve 할 때 자동으로 띄울 프리셋
     [sessions]                   # 음성으로 띄울 수 있는 세션 프리셋 (이름 = 작업 폴더)
     "로그 플랫폼" = "~/Project/logplatform"
     "IMM-EKF 논문" = "~/Papers/imm-ekf"
@@ -40,6 +41,7 @@ class BridgeConfig:
     claude_extra_args: list[str] = field(default_factory=list)
     claude_config_dir: Path | None = None   # transcript 탐색 위치 (기본 ~/.claude)
     sessions: dict[str, str] = field(default_factory=dict)  # 프리셋 이름 → 폴더
+    autostart: list[str] = field(default_factory=list)      # serve 시 자동으로 띄울 프리셋 이름
     ready_timeout: float = 60.0
     inject_ack_timeout: float = 20.0
     quiet_window: float = 4.0     # 이 시간 동안 조용하면(아래 속도 미만) 대기로 본다
@@ -52,6 +54,9 @@ class BridgeConfig:
         if self.claude_config_dir is not None:
             self.claude_config_dir = Path(self.claude_config_dir).expanduser()
         self.sessions = {k: str(Path(v).expanduser()) for k, v in self.sessions.items()}
+        unknown = [n for n in self.autostart if n not in self.sessions]
+        if unknown:
+            raise ValueError(f"autostart 에 등록되지 않은 프리셋: {', '.join(unknown)} (등록: {', '.join(self.sessions) or '없음'})")
         for a in self.claude_extra_args:
             if a.split("=")[0] in FORBIDDEN_ARGS:
                 raise ValueError(f"허용되지 않는 claude 인자: {a} (권한 모드는 default 고정)")

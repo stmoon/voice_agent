@@ -82,3 +82,49 @@ def test_installer_creates_working_install(tmp_path):
     r2 = subprocess.run([sys.executable, str(ROOT / "tools" / "install.py"), "--prefix", str(prefix)],
                         env=env, capture_output=True, text=True, timeout=600)
     assert r2.returncode == 0 and (tmp_path / "cfg" / "config.toml").read_text() == 'port = 9999\n'
+
+
+def _serve_proc(tmp_path, config_text, extra_args=()):
+    code = (
+        "import keyring, sys\n"
+        "from keyring.backend import KeyringBackend\n"
+        "class M(KeyringBackend):\n"
+        "    priority = 1\n"
+        "    def get_password(self, s, u): return 'tok'\n"
+        "    def set_password(self, *a): pass\n"
+        "    def delete_password(self, *a): pass\n"
+        "keyring.set_keyring(M())\n"
+        "from bridge.__main__ import main\n"
+        f"sys.exit(main(['serve', *{list(extra_args)!r}]))\n"
+    )
+    cfg = tmp_path / "c.toml"
+    cfg.write_text(config_text)
+    env = {**os.environ, "VC_CONFIG": str(cfg)}
+    return subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
+
+
+@pytest.mark.req("P7-1")
+def test_serve_refuses_busy_port_before_starting_sessions(tmp_path):
+    import socket
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    s.listen()
+    port = s.getsockname()[1]
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    try:
+        r = _serve_proc(tmp_path, f'port = {port}\nautostart = ["a"]\n[sessions]\na = "{ws}"\n')
+    finally:
+        s.close()
+    assert r.returncode == 2
+    assert "이미 다른 프로세스" in r.stderr and "세션 기동" not in r.stderr
+
+
+@pytest.mark.req("P7-1")
+def test_autostart_must_name_registered_presets():
+    from bridge.config import BridgeConfig
+
+    with pytest.raises(ValueError):
+        BridgeConfig(sessions={"a": "/tmp"}, autostart=["b"])
+    assert BridgeConfig(sessions={"a": "/tmp"}, autostart=["a"]).autostart == ["a"]

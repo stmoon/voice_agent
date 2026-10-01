@@ -75,9 +75,7 @@ def build_mcp(manager: SessionManager) -> MCPServer:
 def build_app(manager: SessionManager, token):
     cfg: BridgeConfig = manager.config
     mcp = build_mcp(manager)
-    hosts = ["127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*", *cfg.allowed_hosts]
-    security = TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=hosts,
-                                         allowed_origins=["https://claude.ai", "http://localhost", "http://localhost:*", "http://127.0.0.1:*",
-                                                          *[f"https://{h}" for h in cfg.allowed_hosts]])
+    # Host/Origin 검사는 TokenAuthMiddleware 가 한다 (라이브러리 검사는 "*.trycloudflare.com" 같은 와일드카드를 못 씀)
+    security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
     app = mcp.streamable_http_app(streamable_http_path="/mcp", transport_security=security, host=cfg.bind)
-    return TokenAuthMiddleware(app, token)
+    return TokenAuthMiddleware(app, token, allowed_hosts=cfg.allowed_hosts)

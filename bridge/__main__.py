@@ -24,8 +24,13 @@ def cmd_serve(args, cfg: BridgeConfig) -> int:
     from .session_manager import BridgeError, SessionManager
 
     token = load_secret(MCP_TOKEN)  # 없으면 여기서 실패 (평문 대체 없음)
+    if not _port_free(cfg.bind, cfg.port):
+        print(f"[bridge] {cfg.bind}:{cfg.port} 를 이미 다른 프로세스가 쓰고 있습니다 (bridge 가 이미 실행 중인지 확인). "
+              "세션을 띄우지 않고 종료합니다.", file=sys.stderr)
+        return 2
     manager = SessionManager(cfg)
-    for name in args.start or []:
+    names = list(dict.fromkeys([*cfg.autostart, *(args.start or [])]))  # 설정 autostart + --start, 중복 제거
+    for name in names:
         try:
             s = manager.start_session(name)
             print(f"[bridge] 세션 기동: {s.name} ({s.cwd})", file=sys.stderr)
@@ -50,6 +55,22 @@ def cmd_serve(args, cfg: BridgeConfig) -> int:
     finally:
         manager.shutdown()
     return 0
+
+
+def _port_free(host: str, port: int) -> bool:
+    import socket
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if sys.platform != "win32":
+        # uvicorn 과 같게: 방금 끈 서버의 TIME_WAIT 연결은 무시하고, 실제로 LISTEN 중인 것만 '사용 중'으로 본다
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
 
 
 def cmd_token(args, cfg: BridgeConfig) -> int:
@@ -77,6 +98,7 @@ def cmd_info(args, cfg: BridgeConfig) -> int:
     print(f"host_id   : {cfg.host_id}")
     print(f"listen    : {cfg.bind}:{cfg.port}")
     print(f"presets   : {', '.join(cfg.sessions) or '(없음)'}")
+    print(f"autostart : {', '.join(cfg.autostart) or '(없음)'}")
     print(f"hosts     : {', '.join(cfg.allowed_hosts) or '(없음)'}")
     return 0
 

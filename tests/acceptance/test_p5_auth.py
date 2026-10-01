@@ -180,3 +180,54 @@ def test_serve_access_log_has_no_token(tmp_path):
         out, _ = p.communicate(timeout=10)
     assert "/t/***/mcp" in out, out
     assert "LOGSECRET123" not in out
+
+
+@pytest.mark.req("P5-1")
+@pytest.mark.parametrize("host,patterns,ok", [
+    ("127.0.0.1:8765", [], True),
+    ("localhost:8765", [], True),
+    ("evil.example.com", [], False),
+    ("abc-def.trycloudflare.com", ["*.trycloudflare.com"], True),
+    ("trycloudflare.com", ["*.trycloudflare.com"], False),
+    ("abc.trycloudflare.com.evil.com", ["*.trycloudflare.com"], False),
+    ("eviltrycloudflare.com", ["*.trycloudflare.com"], False),
+    ("macmini.bridge.example.com", ["macmini.bridge.example.com"], True),
+    ("other.bridge.example.com", ["macmini.bridge.example.com"], False),
+    ("", ["*.trycloudflare.com"], False),
+])
+def test_host_rule(host, patterns, ok):
+    assert auth.host_allowed(host, patterns) is ok
+
+
+@pytest.mark.req("P5-1")
+@pytest.mark.parametrize("origin,ok", [
+    (None, True),
+    ("https://claude.ai", True),
+    ("https://abc.trycloudflare.com", True),
+    ("http://abc.trycloudflare.com", False),
+    ("https://evil.com", False),
+    ("http://localhost:3000", True),
+])
+def test_origin_rule(origin, ok):
+    assert auth.origin_allowed(origin, ["*.trycloudflare.com"]) is ok
+
+
+@pytest.mark.req("P5-1")
+def test_wrong_host_or_origin_blocked_even_with_valid_token(server):
+    good = {**HDR, "Authorization": "Bearer right-token"}
+    assert httpx.post(server + "/mcp", json=INIT, headers={**good, "Host": "evil.example.com"}).status_code == 421
+    assert httpx.post(server + "/mcp", json=INIT, headers={**good, "Origin": "https://evil.com"}).status_code == 403
+    assert httpx.post(server + "/mcp", json=INIT, headers=good).status_code == 200
+
+
+@pytest.mark.req("P5-1")
+def test_wildcard_tunnel_host_accepted(manager):
+    manager.config.allowed_hosts = ["*.trycloudflare.com"]
+    port = free_port()
+    with Server(build_app(manager, "right-token"), port):
+        r = httpx.post(f"http://127.0.0.1:{port}/t/right-token/mcp", json=INIT,
+                       headers={**HDR, "Host": "rec-buyers-x.trycloudflare.com"})
+        assert r.status_code == 200
+        r = httpx.post(f"http://127.0.0.1:{port}/t/right-token/mcp", json=INIT,
+                       headers={**HDR, "Host": "evil.example.com"})
+        assert r.status_code == 421

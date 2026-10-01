@@ -64,12 +64,55 @@ def _eq(a: str, b: str) -> bool:
     return hmac.compare_digest(a.encode(), b.encode())
 
 
-class TokenAuthMiddleware:
-    """ASGI 미들웨어. /healthz 외 모든 HTTP 요청에 토큰 요구, 실패 시 401."""
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 
-    def __init__(self, app, token: str | Callable[[], str]):
+
+def host_allowed(host: str, patterns) -> bool:
+    """Host 헤더 검사 (DNS 리바인딩 방지). 로컬은 항상 허용.
+    패턴: 정확한 호스트 / "*.trycloudflare.com" 같은 하위 도메인 와일드카드 / "host:*" 임의 포트."""
+    host = (host or "").strip().lower()
+    if not host:
+        return False
+    name = host.rsplit(":", 1)[0] if not host.endswith("]") else host
+    if name in LOCAL_HOSTS:
+        return True
+    for p in patterns:
+        p = p.strip().lower()
+        if p.startswith("*."):
+            if name.endswith(p[1:]) and len(name) > len(p) - 1:
+                return True
+        elif p.endswith(":*"):
+            if name == p[:-2]:
+                return True
+        elif host == p or name == p:
+            return True
+    return False
+
+
+def origin_allowed(origin: str | None, patterns) -> bool:
+    """Origin 은 없으면(서버 간 요청) 허용. 있으면 claude.ai·로컬·허용 호스트만."""
+    if not origin:
+        return True
+    from urllib.parse import urlsplit
+
+    try:
+        u = urlsplit(origin)
+    except ValueError:
+        return False
+    name = (u.hostname or "").lower()
+    if u.scheme == "https" and (name == "claude.ai" or name.endswith(".claude.ai")):
+        return True
+    return host_allowed(u.netloc, patterns) and (u.scheme == "https" or name in LOCAL_HOSTS)
+
+
+class TokenAuthMiddleware:
+    """ASGI 미들웨어. /healthz 외 모든 HTTP 요청에 대해
+    Host 검사(421) → Origin 검사(403) → 토큰 검사(401)."""
+
+    def __init__(self, app, token: str | Callable[[], str], allowed_hosts=()):
         self.app = app
         self._token = token
+        self.allowed_hosts = list(allowed_hosts)
 
     def token(self) -> str:
         return self._token() if callable(self._token) else self._token
@@ -80,6 +123,11 @@ class TokenAuthMiddleware:
         path: str = scope.get("path", "")
         if path == "/healthz":
             return await _respond(send, 200, {"ok": True})
+        headers = {k.lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        if not host_allowed(headers.get(b"host", ""), self.allowed_hosts):
+            return await _respond(send, 421, {"error": "invalid host"})
+        if not origin_allowed(headers.get(b"origin"), self.allowed_hosts):
+            return await _respond(send, 403, {"error": "invalid origin"})
         expected = self.token()
         if path.startswith("/t/"):
             _, _, rest = path.partition("/t/")
@@ -90,11 +138,9 @@ class TokenAuthMiddleware:
                 scope["raw_path"] = scope["path"].encode()
                 return await self.app(scope, receive, send)
             return await _respond(send, 401, {"error": "unauthorized"})
-        for k, v in scope.get("headers", []):
-            if k.lower() == b"authorization":
-                val = v.decode("latin-1")
-                if val.lower().startswith("bearer ") and _eq(val[7:].strip(), expected):
-                    return await self.app(scope, receive, send)
+        val = headers.get(b"authorization", "")
+        if val.lower().startswith("bearer ") and _eq(val[7:].strip(), expected):
+            return await self.app(scope, receive, send)
         return await _respond(send, 401, {"error": "unauthorized"})
 
 
