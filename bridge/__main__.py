@@ -5,6 +5,8 @@
     voice-bridge token set-notion             노션 통합 토큰을 보안 저장소에 저장 (표준입력으로 받음)
     voice-bridge info                         설정·호스트 정보
     voice-bridge url                          커넥터 주소 출력 (현재 터널 주소 + 키체인 토큰)
+    voice-bridge tunnel                       cloudflared 임시 터널 (주소가 바뀌면 맥 알림)
+    voice-bridge service install|uninstall|status   로그인 시 자동 실행 (macOS launchd)
 """
 from __future__ import annotations
 
@@ -111,6 +113,11 @@ def tunnel_hosts(cfg: BridgeConfig) -> list[str]:
                     hosts.append(h)
         except Exception:
             continue
+    from .service import host_file
+
+    hf = host_file(cfg.state_dir)  # 자동 실행 터널이 기록한 최근 주소 (메트릭 조회 실패 대비)
+    if not hosts and hf.exists() and hf.read_text().strip():
+        hosts.append(hf.read_text().strip())
     hosts += [h for h in cfg.allowed_hosts if "*" not in h and h not in hosts]
     return hosts
 
@@ -133,6 +140,28 @@ def cmd_url(args, cfg: BridgeConfig) -> int:
     return 0
 
 
+def cmd_tunnel(args, cfg: BridgeConfig) -> int:
+    from .service import run_tunnel
+
+    return run_tunnel(cfg.port, cfg.state_dir)
+
+
+def cmd_service(args, cfg: BridgeConfig) -> int:
+    from . import service
+
+    if args.action == "install":
+        for p in service.install():
+            print(f"등록: {p}")
+        print(f"로그: {service.LOG_DIR}")
+        print("터널 주소가 정해지면 맥 알림이 뜹니다. 새 주소: voice-bridge url")
+    elif args.action == "uninstall":
+        for p in service.uninstall():
+            print(f"해제: {p}")
+    for label, st in service.status().items():
+        print(f"{label}: {st}")
+    return 0
+
+
 def cmd_info(args, cfg: BridgeConfig) -> int:
     print(f"config    : {default_config_path()}")
     print(f"host_id   : {cfg.host_id}")
@@ -152,9 +181,13 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("action", choices=["init", "set-notion"])
     sub.add_parser("info")
     sub.add_parser("url", help="커넥터 주소(토큰 포함) 출력")
+    sub.add_parser("tunnel", help="cloudflared 임시 터널 실행 (주소 바뀌면 맥 알림)")
+    sv = sub.add_parser("service", help="자동 실행 (launchd) 등록·해제·상태")
+    sv.add_argument("action", choices=["install", "uninstall", "status"])
     args = p.parse_args(argv)
     cfg = BridgeConfig.load()
-    return {"serve": cmd_serve, "token": cmd_token, "info": cmd_info, "url": cmd_url}[args.cmd](args, cfg)
+    return {"serve": cmd_serve, "token": cmd_token, "info": cmd_info, "url": cmd_url,
+            "tunnel": cmd_tunnel, "service": cmd_service}[args.cmd](args, cfg)
 
 
 if __name__ == "__main__":
