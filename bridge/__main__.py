@@ -4,6 +4,7 @@
     voice-bridge token init                   MCP 토큰 생성 → OS 보안 저장소 저장, 커넥터 URL 출력
     voice-bridge token set-notion             노션 통합 토큰을 보안 저장소에 저장 (표준입력으로 받음)
     voice-bridge info                         설정·호스트 정보
+    voice-bridge url                          커넥터 주소 출력 (현재 터널 주소 + 키체인 토큰)
 """
 from __future__ import annotations
 
@@ -96,6 +97,42 @@ def cmd_token(args, cfg: BridgeConfig) -> int:
     return 1
 
 
+def tunnel_hosts(cfg: BridgeConfig) -> list[str]:
+    """커넥터에 쓸 외부 호스트: 실행 중인 임시 터널(cloudflared 메트릭 /quicktunnel) + 설정의 고정 호스트."""
+    import json
+    import urllib.request
+
+    hosts = []
+    for port in range(20241, 20246):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/quicktunnel", timeout=1) as r:
+                h = json.loads(r.read() or b"{}").get("hostname")
+                if h:
+                    hosts.append(h)
+        except Exception:
+            continue
+    hosts += [h for h in cfg.allowed_hosts if "*" not in h and h not in hosts]
+    return hosts
+
+
+def cmd_url(args, cfg: BridgeConfig) -> int:
+    from .auth import MCP_TOKEN, TokenMissing, load_secret
+
+    try:
+        tok = load_secret(MCP_TOKEN)
+    except TokenMissing as e:
+        print(e, file=sys.stderr)
+        return 1
+    hosts = tunnel_hosts(cfg)
+    if not hosts:
+        print("실행 중인 터널이 없습니다. 먼저: cloudflared tunnel --url http://localhost:%d" % cfg.port, file=sys.stderr)
+        return 2
+    print("커넥터 주소 (claude.ai → 설정 → 커넥터 → 사용자 지정 커넥터 추가에 그대로 붙여넣기):")
+    for h in hosts:
+        print(f"  https://{h}/t/{tok}/mcp")
+    return 0
+
+
 def cmd_info(args, cfg: BridgeConfig) -> int:
     print(f"config    : {default_config_path()}")
     print(f"host_id   : {cfg.host_id}")
@@ -114,9 +151,10 @@ def main(argv: list[str] | None = None) -> int:
     t = sub.add_parser("token")
     t.add_argument("action", choices=["init", "set-notion"])
     sub.add_parser("info")
+    sub.add_parser("url", help="커넥터 주소(토큰 포함) 출력")
     args = p.parse_args(argv)
     cfg = BridgeConfig.load()
-    return {"serve": cmd_serve, "token": cmd_token, "info": cmd_info}[args.cmd](args, cfg)
+    return {"serve": cmd_serve, "token": cmd_token, "info": cmd_info, "url": cmd_url}[args.cmd](args, cfg)
 
 
 if __name__ == "__main__":

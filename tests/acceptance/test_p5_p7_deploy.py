@@ -128,3 +128,29 @@ def test_autostart_must_name_registered_presets():
     with pytest.raises(ValueError):
         BridgeConfig(sessions={"a": "/tmp"}, autostart=["b"])
     assert BridgeConfig(sessions={"a": "/tmp"}, autostart=["a"]).autostart == ["a"]
+
+
+@pytest.mark.req("P5-3")
+def test_url_command_builds_connector_url(tmp_path, monkeypatch, capsys):
+    import keyring
+    from keyring.backend import KeyringBackend
+
+    from bridge import __main__ as cli
+    from bridge.config import BridgeConfig
+
+    class M(KeyringBackend):
+        priority = 1
+        def get_password(self, s, u): return "TOK123"
+        def set_password(self, *a): pass
+        def delete_password(self, *a): pass
+
+    old = keyring.get_keyring()
+    keyring.set_keyring(M())
+    try:
+        monkeypatch.setattr(cli, "tunnel_hosts", lambda cfg: ["abc.trycloudflare.com"])
+        assert cli.cmd_url(None, BridgeConfig()) == 0
+        assert "https://abc.trycloudflare.com/t/TOK123/mcp" in capsys.readouterr().out
+        monkeypatch.setattr(cli, "tunnel_hosts", lambda cfg: [])
+        assert cli.cmd_url(None, BridgeConfig()) == 2
+    finally:
+        keyring.set_keyring(old)
