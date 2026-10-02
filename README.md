@@ -42,7 +42,26 @@ allowed_hosts = ["macmini.bridge.example.com"]
 ```
 
 커넥터 URL: `https://<호스트ID>.bridge.<도메인>/t/<토큰>/mcp` (헤더를 못 넣는 커넥터용).
-헤더를 넣을 수 있으면 `Authorization: Bearer <토큰>` + `/mcp`.
+헤더를 넣을 수 있으면 `Authorization: Bearer <토큰>` + `/mcp`. 현재 주소는 `voice-bridge url` 이 조립해 준다.
+
+### 자동 실행 (macOS)
+
+```bash
+voice-bridge service install     # 로그인 시 자동 실행 + 죽으면 재시작 (LaunchAgent 2개: serve, tunnel)
+voice-bridge service status
+voice-bridge service uninstall
+```
+
+- `serve` 는 설정의 `autostart` 세션을 함께 띄운다. 로그: `~/Library/Logs/voice-bridge/`
+- `tunnel` 은 cloudflared 임시 터널을 띄우고, **발급 주소가 이전과 다르면 맥 알림**을 띄운다
+  (재부팅·터널 재시작 시 주소가 바뀜 → `voice-bridge url` 로 새 주소 확인 후 커넥터 갱신).
+- 임시 터널은 `allowed_hosts = ["*.trycloudflare.com"]` 로 허용하면 주소가 바뀌어도 bridge 재시작이 필요 없다.
+
+### claude.ai 커넥터 등록 시 주의 (실측)
+
+- claude.ai 는 MCP 연결에 성공한 뒤에도 `/.well-known/oauth-*` 를 조회한다. 여기에 401 을 주면 OAuth 서버로 오인해
+  `/register` 를 시도하다 "로그인 서비스에 등록할 수 없습니다" 로 실패한다 → bridge 는 OAuth 경로에 404 를 준다.
+- 등록 후 **새 대화**에서 입력창의 커넥터 메뉴로 켜야 도구가 로드된다.
 
 ## 설계 결정 (PoC 결과 반영)
 
