@@ -64,7 +64,26 @@ def _eq(a: str, b: str) -> bool:
     return hmac.compare_digest(a.encode(), b.encode())
 
 
+def _fp(v: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(v.encode()).hexdigest()[:8]
+
+
+_log = logging.getLogger("uvicorn.error")
+
+
+def _diag(reason: str, given: str | None, expected: str, headers: dict) -> None:
+    """401 원인 진단. 토큰 값은 남기지 않고 길이·해시·대소문자 차이만."""
+    g = given or ""
+    _log.warning("[auth] 401 %s: 받은 토큰 len=%d sha=%s / 기대 len=%d sha=%s / 대소문자만다름=%s / auth헤더=%s / ua=%s",
+                 reason, len(g), _fp(g) if g else "-", len(expected), _fp(expected),
+                 bool(g) and g != expected and g.lower() == expected.lower(),
+                 "있음" if headers.get(b"authorization") else "없음", headers.get(b"user-agent", "-")[:60])
+
+
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
+_OAUTH_PATHS = ("/register", "/authorize", "/token")
 
 
 def host_allowed(host: str, patterns) -> bool:
@@ -123,6 +142,10 @@ class TokenAuthMiddleware:
         path: str = scope.get("path", "")
         if path == "/healthz":
             return await _respond(send, 200, {"ok": True})
+        if path.startswith("/.well-known/") or path in _OAUTH_PATHS:
+            # OAuth 를 쓰지 않는 서버임을 알린다. 401 로 답하면 claude.ai 가 OAuth 서버로 오인해
+            # 클라이언트 등록(/register)을 시도하다 "로그인 서비스에 등록할 수 없습니다" 로 실패한다 (실측).
+            return await _respond(send, 404, {"error": "not found"})
         headers = {k.lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
         if not host_allowed(headers.get(b"host", ""), self.allowed_hosts):
             return await _respond(send, 421, {"error": "invalid host"})
@@ -137,10 +160,12 @@ class TokenAuthMiddleware:
                 scope["path"] = "/" + tail if sep else "/"
                 scope["raw_path"] = scope["path"].encode()
                 return await self.app(scope, receive, send)
+            _diag("경로 토큰 불일치", given, expected, headers)
             return await _respond(send, 401, {"error": "unauthorized"})
         val = headers.get(b"authorization", "")
         if val.lower().startswith("bearer ") and _eq(val[7:].strip(), expected):
             return await self.app(scope, receive, send)
+        _diag("토큰 없음/헤더 불일치", val[7:].strip() if val.lower().startswith("bearer ") else None, expected, headers)
         return await _respond(send, 401, {"error": "unauthorized"})
 
 

@@ -231,3 +231,31 @@ def test_wildcard_tunnel_host_accepted(manager):
         r = httpx.post(f"http://127.0.0.1:{port}/t/right-token/mcp", json=INIT,
                        headers={**HDR, "Host": "evil.example.com"})
         assert r.status_code == 421
+
+
+@pytest.mark.req("P5-1")
+@pytest.mark.parametrize("method,path", [
+    ("GET", "/.well-known/oauth-protected-resource"),
+    ("GET", "/.well-known/oauth-protected-resource/t/right-token/mcp"),
+    ("GET", "/.well-known/oauth-authorization-server"),
+    ("POST", "/register"),
+    ("GET", "/authorize"),
+    ("POST", "/token"),
+])
+def test_oauth_discovery_says_not_found(server, method, path):
+    """claude.ai 는 MCP 연결 성공 후에도 OAuth 메타데이터를 조회한다. 401 이면 OAuth 서버로 오인해
+    /register 를 시도하다 등록 실패 → 404 로 '로그인 없음' 을 알려야 한다 (실측)."""
+    r = httpx.request(method, server + path, headers=HDR, json={} if method == "POST" else None)
+    assert r.status_code == 404
+    assert "www-authenticate" not in r.headers
+
+
+@pytest.mark.req("P5-1")
+def test_claude_ai_add_connector_sequence(server):
+    """실측 순서 재현: POST /t/<토큰>/mcp(initialize) → OAuth 조회들 → 인증 없음으로 판정되어야 함."""
+    r = httpx.post(server + "/t/right-token/mcp", json=INIT, headers=HDR)
+    assert r.status_code == 200
+    for p in ("/.well-known/oauth-protected-resource/t/right-token/mcp", "/.well-known/oauth-protected-resource",
+              "/.well-known/oauth-authorization-server"):
+        assert httpx.get(server + p).status_code == 404
+    assert httpx.post(server + "/register", json={}).status_code == 404
