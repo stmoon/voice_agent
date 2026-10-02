@@ -152,6 +152,7 @@ class TokenAuthMiddleware:
         if not origin_allowed(headers.get(b"origin"), self.allowed_hosts):
             return await _respond(send, 403, {"error": "invalid origin"})
         expected = self.token()
+        receive = await _peek_rpc(scope, receive)
         if path.startswith("/t/"):
             _, _, rest = path.partition("/t/")
             given, sep, tail = rest.partition("/")
@@ -167,6 +168,39 @@ class TokenAuthMiddleware:
             return await self.app(scope, receive, send)
         _diag("토큰 없음/헤더 불일치", val[7:].strip() if val.lower().startswith("bearer ") else None, expected, headers)
         return await _respond(send, 401, {"error": "unauthorized"})
+
+
+async def _peek_rpc(scope, receive):
+    """진단: POST 본문의 JSON-RPC 메서드(와 tools/call 의 도구 이름)만 로그에 남긴다. 인자·토큰은 남기지 않음.
+    본문을 읽은 뒤 그대로 다시 흘려보내는 receive 를 돌려준다."""
+    if scope.get("method") != "POST":
+        return receive
+    chunks, more = [], True
+    while more:
+        msg = await receive()
+        if msg["type"] != "http.request":
+            break
+        chunks.append(msg.get("body", b""))
+        more = msg.get("more_body", False)
+    body = b"".join(chunks)
+    try:
+        data = json.loads(body or b"null")
+        for m in (data if isinstance(data, list) else [data]):
+            if isinstance(m, dict) and "method" in m:
+                name = (m.get("params") or {}).get("name") if m["method"] == "tools/call" else None
+                _log.info("[mcp] %s%s", m["method"], f" → {name}" if name else "")
+    except Exception:
+        pass
+    sent = False
+
+    async def replay():
+        nonlocal sent
+        if not sent:
+            sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return await receive()
+
+    return replay
 
 
 async def _respond(send, status: int, body: dict) -> None:

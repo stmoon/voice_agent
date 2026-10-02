@@ -27,10 +27,18 @@ INSTRUCTIONS = """\
 def build_mcp(manager: SessionManager) -> MCPServer:
     mcp = MCPServer(name=f"voice-bridge-{manager.config.host_id}", instructions=INSTRUCTIONS, version="0.1.0")
 
+    import logging
+
+    log = logging.getLogger("uvicorn.error")
+
     async def call(fn, *a):
+        name = getattr(fn, "__name__", "?")
         try:
-            return await anyio.to_thread.run_sync(fn, *a)
+            r = await anyio.to_thread.run_sync(fn, *a)
+            log.info("[tool] %s → ok", name)
+            return r
         except BridgeError as e:
+            log.info("[tool] %s → %s", name, e.code)
             return e.to_dict()
 
     @mcp.tool()
