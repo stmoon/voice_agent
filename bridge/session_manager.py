@@ -7,7 +7,8 @@
 - desktop    : 데스크톱 앱·다른 터미널의 대화형 세션. 입력 통로가 없어 **보기 전용** (목록에만 표시)
 
 규칙 (노션 요구사항)
-- 주입 대상은 bridge 가 띄운 세션, 또는 RC 가 켜진 백그라운드 세션뿐이고, 어느 쪽이든 권한 모드가 default 일 때만
+- 주입 대상은 bridge 가 띄운 세션, 또는 RC 가 켜진 백그라운드 세션뿐이고, 어느 쪽이든 권한 모드가 허용 목록
+  (기본: default·auto)에 있을 때만. 권한 우회(bypassPermissions)는 어떤 설정으로도 허용하지 않음
   (데스크톱 앱 세션·임의 터미널에는 주입하지 않음)
 - 세션 지정은 명시적 select 로만. 고정 없이 send 하면 거부
 - 대기 상태일 때만 주입. 작업 중·승인 대기면 거부하고 상태만 알림. 큐잉 없음
@@ -52,7 +53,7 @@ class BridgeError(Exception):
         return {"ok": False, "error": self.code, "message": self.message, **self.extra}
 
 
-BG_LAUNCH = 'claude --bg -n "이름" --remote-control "이름" --permission-mode default'
+BG_LAUNCH = 'claude --bg -n "이름" --remote-control "이름"'  # 승인 필요 모드로 쓰려면 --permission-mode default
 
 
 def sanitize_command(text: str) -> str:
@@ -94,6 +95,7 @@ class Session:
     config_dir: Path | None
     kind: str = BRIDGE
     agent_id: str | None = None          # background: `claude attach` 에 쓰는 짧은 ID
+    allowed_modes: tuple = ("default", "auto")
     live: AgentsCache | None = None
     started_at: float = field(default_factory=time.time)
     ready: bool = False
@@ -201,21 +203,22 @@ class Session:
 
     def blocker(self, records: list[dict] | None = None) -> str | None:
         """명령을 넣을 수 없는 이유 (없으면 None).
-        - 모든 세션: 권한 모드가 승인 필요(default)여야 함 (Code 탭에서 acceptEdits·auto 로 바뀌면 거부)
-        - 백그라운드 세션: Remote Control 이 켜져 있어야 함 (휴대폰 Code 탭에서 승인할 수 있도록)"""
+        - 모든 세션: 권한 모드가 허용 목록(기본: default·auto)에 있어야 함. Code 탭에서 acceptEdits·권한 우회로 바뀌면 거부
+        - 백그라운드 세션: Remote Control 이 켜져 있어야 함 (휴대폰 Code 탭에서 보고 승인할 수 있도록)"""
         records = records if records is not None else self.records()
         if self.kind == BACKGROUND and not tr.rc_url(records):
             return f"Remote Control 이 켜지지 않은 세션입니다. 다음처럼 다시 띄우세요: {BG_LAUNCH}"
         mode = self.permission_mode(records)
-        if mode is not None and mode != "default" or (mode is None and self.kind == BACKGROUND):
-            fix = f" 다음처럼 다시 띄우세요: {BG_LAUNCH}" if self.kind == BACKGROUND else " Code 탭에서 승인 필요 모드로 되돌려 주세요."
-            return f"권한 모드가 '{mode or '알 수 없음'}' 입니다. 승인 필요(default) 모드 세션에만 음성 명령을 넣습니다.{fix}"
+        if (mode is not None and mode not in self.allowed_modes) or (mode is None and self.kind == BACKGROUND):
+            allowed = "·".join(self.allowed_modes)
+            fix = f" 다음처럼 다시 띄우세요: {BG_LAUNCH}" if self.kind == BACKGROUND else " Code 탭에서 허용 모드로 되돌려 주세요."
+            return f"권한 모드가 '{mode or '알 수 없음'}' 입니다. 음성 명령은 {allowed} 모드 세션에만 넣습니다.{fix}"
         return None
 
     def prompt_box_ready(self) -> bool:
         """안전장치: 화면 맨 뒤가 입력 대기 표시인지. 권한·확인 대화상자가 떠 있으면 False.
         대화상자에 명령+Enter 를 넣으면 기본 선택(승인)이 눌릴 수 있으므로 주입 전에 반드시 확인한다.
-        대기 표시: 일반 화면 '? for shortcuts', attach 화면 '⏸ manual mode on' (실측)."""
+        대기 표시: 일반 화면 '? for shortcuts', attach 화면은 모드 표시 '⏸ manual mode on' / '⏵⏵ auto mode on' (실측)."""
         if self.proc is None:
             return False
         scr = "".join(self.proc.screen().split()).lower()
@@ -295,7 +298,7 @@ class SessionManager:
                 *self.config.claude_bin,
                 "--remote-control", name,
                 "--session-id", sid,
-                "--permission-mode", "default",
+                "--permission-mode", self.config.session_permission_mode,
                 "--settings", str(settings_file),
                 *self.config.claude_extra_args,
             ]
@@ -303,7 +306,8 @@ class SessionManager:
             s = Session(name=name, cwd=cwd, host=self.config.host_id, session_id=sid, proc=proc,
                         events_file=events_file, config_dir=self.config.claude_config_dir, kind=BRIDGE,
                         live=self.agents, quiet_window=self.config.quiet_window, quiet_rate=self.config.quiet_rate,
-                        inflight_timeout=self.config.inject_ack_timeout)
+                        inflight_timeout=self.config.inject_ack_timeout,
+                        allowed_modes=tuple(self.config.allowed_permission_modes))
             self._sessions[sid] = s
         if wait:
             self.wait_ready(s)
@@ -362,7 +366,8 @@ class SessionManager:
                 s = Session(name=a.get("name") or a.get("id") or sid[:8], cwd=a.get("cwd") or "", host=self.config.host_id,
                             session_id=sid, proc=None, events_file=None, config_dir=self.config.claude_config_dir,
                             kind=BACKGROUND, agent_id=a.get("id"), live=self.agents, ready=True,
-                            inflight_timeout=self.config.inject_ack_timeout)
+                            inflight_timeout=self.config.inject_ack_timeout,
+                            allowed_modes=tuple(self.config.allowed_permission_modes))
                 self._sessions[sid] = s
             else:
                 s.name = a.get("name") or s.name
@@ -616,7 +621,8 @@ class SessionManager:
         return {"ok": True, "session": s.name, "message": "중단 신호(Esc)를 보냈습니다."}
 
 
-_IDLE_MARKERS = ("forshortcuts", "manualmodeon")
+# 입력 대기 화면 표시: 일반 화면 하단 '? for shortcuts', attach 화면은 모드 표시만 있음 (실측: manual / auto mode on)
+_IDLE_MARKERS = ("forshortcuts", "manualmodeon", "automodeon", "planmodeon", "accepteditson")
 _DIALOG_MARKERS = ("doyouwanttoproceed", "doyouwanttomake", "doyouwanttocreate", "entertoconfirm", "esctocancel")
 _LIVE_TO_STATUS = {"idle": tr.IDLE, "busy": tr.WORKING, "waiting": tr.AWAITING_APPROVAL}
 

@@ -64,7 +64,7 @@ def test_list_shows_bridge_background_and_desktop(manager, fake_config, workdir)
     b, w, v = by_name(lst, "테스트 세션"), by_name(lst, "위키"), by_name(lst, "voice_commander")
     assert b["commandable"] and b["kind_ko"] == "브리지 세션"
     assert w["commandable"] and w["kind_ko"] == "백그라운드 세션" and w["rc_url"] and w["status_ko"] == "대기"
-    assert not v["commandable"] and "--permission-mode default" in v["reason"]  # 음성용 세션 띄우는 법 안내
+    assert not v["commandable"] and "claude --bg" in v["reason"]  # 음성용 세션 띄우는 법 안내
     assert by_name(lst, "테스트")["status_ko"] == "작업 중"  # 실시간 상태(busy)
     for d in lst:
         assert d["folder"] == str(workdir.resolve()) or d["folder"] == str(workdir)
@@ -75,14 +75,14 @@ def test_list_shows_bridge_background_and_desktop(manager, fake_config, workdir)
 def test_view_only_and_unsafe_background_sessions_are_refused(manager, fake_config, workdir):
     make_desktop(fake_config, "데스크톱", workdir)
     make_bg(fake_config, "RC없음", workdir, rc=False)
-    make_bg(fake_config, "자동모드", workdir, mode="auto")
+    make_bg(fake_config, "편집자동", workdir, mode="acceptEdits")
     lst = manager.list_sessions()
     assert not by_name(lst, "RC없음")["commandable"] and "Remote Control" in by_name(lst, "RC없음")["reason"]
-    assert not by_name(lst, "자동모드")["commandable"] and "default" in by_name(lst, "자동모드")["reason"]
+    assert not by_name(lst, "편집자동")["commandable"] and "default·auto" in by_name(lst, "편집자동")["reason"]
     with pytest.raises(BridgeError) as e:
         manager.select_session("데스크톱")
     assert e.value.code == "view_only"
-    for n in ("RC없음", "자동모드"):
+    for n in ("RC없음", "편집자동"):
         with pytest.raises(BridgeError) as e:
             manager.select_session(n)
         assert e.value.code == "not_commandable"

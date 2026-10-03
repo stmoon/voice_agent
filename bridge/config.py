@@ -19,8 +19,15 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# 음성 경로로 권한 우회 모드를 쓰지 않는다
+# 음성 경로로 권한 우회 모드를 쓰지 않는다 (권한 모드는 아래 설정 항목으로만 정한다)
 FORBIDDEN_ARGS = ("--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--permission-mode")
+
+# 음성 명령을 받을 수 있는 권한 모드 후보. bypassPermissions(모든 권한 검사 끔)는 어떤 설정으로도 허용하지 않는다.
+#   default     : 위험한 작업마다 사람이 승인
+#   auto        : Claude 가 작업마다 위험도를 판단해 안전한 것은 자동 실행, 위험한 것은 차단 (2026-10-03 사용자 결정으로 기본 허용)
+#   plan        : 계획만 세우고 실행하지 않음
+#   acceptEdits : 파일 편집을 무조건 자동 승인 (기본 비허용)
+PERMISSION_MODES = ("default", "auto", "plan", "acceptEdits")
 
 
 def default_config_path() -> Path:
@@ -47,6 +54,8 @@ class BridgeConfig:
     quiet_window: float = 4.0     # 이 시간 동안 조용하면(아래 속도 미만) 대기로 본다
     quiet_rate: float = 150.0     # 출력 문자/초. 실측: 작업 중 500~1100, 대기 0~50
     allowed_hosts: list[str] = field(default_factory=list)  # 터널 도메인 (Host 헤더)
+    allowed_permission_modes: list[str] = field(default_factory=lambda: ["default", "auto"])  # 음성 명령을 받을 세션 모드
+    session_permission_mode: str = "default"   # bridge 가 직접 띄우는 세션의 권한 모드
     python: str = sys.executable
     source: Path | None = None    # 읽어 온 설정 파일 (프리셋 다시 읽기용)
 
@@ -60,7 +69,12 @@ class BridgeConfig:
             raise ValueError(f"autostart 에 등록되지 않은 프리셋: {', '.join(unknown)} (등록: {', '.join(self.sessions) or '없음'})")
         for a in self.claude_extra_args:
             if a.split("=")[0] in FORBIDDEN_ARGS:
-                raise ValueError(f"허용되지 않는 claude 인자: {a} (권한 모드는 default 고정)")
+                raise ValueError(f"허용되지 않는 claude 인자: {a} (권한 모드는 session_permission_mode 로 정함)")
+        bad = [m for m in self.allowed_permission_modes if m not in PERMISSION_MODES]
+        if bad:
+            raise ValueError(f"허용할 수 없는 권한 모드: {', '.join(bad)} (가능: {', '.join(PERMISSION_MODES)})")
+        if self.session_permission_mode not in self.allowed_permission_modes:
+            raise ValueError(f"session_permission_mode '{self.session_permission_mode}' 가 allowed_permission_modes 에 없습니다.")
 
     @classmethod
     def load(cls, path: Path | None = None) -> "BridgeConfig":

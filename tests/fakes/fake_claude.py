@@ -44,6 +44,9 @@ SID = opt("--session-id") or str(uuid.uuid4())
 NAME = opt("--remote-control", "")
 SETTINGS = json.load(open(opt("--settings"))) if opt("--settings") else {}
 ATTACH = False
+MODE = opt("--permission-mode", "auto")
+MODE_TEXT = {"default": "⏸ manual mode on", "auto": "⏵⏵ auto mode on", "plan": "⏸ plan mode on",
+             "acceptEdits": "⏵⏵ accept edits on", "bypassPermissions": "⏵⏵ bypass permissions on"}
 CWD = TRANSCRIPT = None
 last_uuid = None
 
@@ -116,7 +119,8 @@ def cmd_bg():
     if "--remote-control" in args and os.environ.get("FAKE_NO_RC") != "1":
         rec({"type": "system", "subtype": "bridge_status", "url": f"https://claude.ai/code/session_fake{short}"})
     reg_save({"id": short, "cwd": CWD, "kind": "background", "sessionId": sid, "name": name or short,
-              "status": "idle", "state": "blocked", "startedAt": int(time.time() * 1000)})
+              "status": "idle", "state": "blocked", "startedAt": int(time.time() * 1000),
+              "mode": opt("--permission-mode", "default")})
     print(f"backgrounded · {short}" + (f" · {name}" if name else "") + " (idle — send a prompt to start)")
 
 
@@ -151,7 +155,8 @@ def out(s):
 
 def idle_screen():
     set_status("idle")
-    footer = "⏸ manual mode on · ← for agents" if ATTACH else "⏸ manual mode on · ? for shortcuts"
+    mode = MODE_TEXT.get(MODE, MODE)
+    footer = f"{mode} · ← for agents" if ATTACH else f"{mode} · ? for shortcuts"
     out(f"\r\n\x1b[2m────────\x1b[0m\r\n❯ \r\n\x1b[2m{footer}\x1b[0m\r\n")
 
 
@@ -256,7 +261,7 @@ def run_prompt(text):
 
 
 def main():
-    global ATTACH, NAME
+    global ATTACH, NAME, MODE
     import signal
 
     signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))  # 종료돼도 finally(등록부 정리) 실행
@@ -271,7 +276,7 @@ def main():
         if e is None:
             print(f"no background session {args[1]}")
             sys.exit(1)
-        ATTACH, NAME = True, e["name"]
+        ATTACH, NAME, MODE = True, e["name"], e.get("mode", "default")
         os.chdir(e["cwd"])
         setup_paths(e["cwd"], e["sessionId"])
     else:

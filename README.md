@@ -24,12 +24,13 @@ voice-bridge url
 ### 2. 음성으로 쓸 세션 띄우기 (작업 폴더마다)
 
 ```bash
-cd ~/Project/내프로젝트 && claude --bg -n "이름" --remote-control "이름" --permission-mode default
+cd ~/Project/내프로젝트 && claude --bg -n "이름" --remote-control "이름"
 ```
 
 - `"이름"`이 휴대폰에서 부르는 세션 이름이다.
 - 처음 쓰는 폴더면 먼저 그 폴더에서 `claude`를 한 번 실행해 "신뢰"를 고른다.
-- `--permission-mode default`를 빼면 목록에는 보여도 명령은 거부된다 (승인 없이 실행되는 모드 차단).
+- 이 맥의 기본 모드(auto)로 뜬다: Claude가 안전한 작업은 바로 실행하고 위험한 작업은 막는다.
+  작업마다 직접 승인하고 싶으면 끝에 `--permission-mode default`를 붙인다.
 
 ### 3. 휴대폰에서 말하기
 
@@ -51,7 +52,7 @@ cd ~/Project/내프로젝트 && claude --bg -n "이름" --remote-control "이름
 |---|---|
 | 맥에 "음성 브리지 주소가 바뀌었습니다" 알림 | `voice-bridge url` → 커넥터 주소를 새 주소로 교체 |
 | 휴대폰이 "도구가 연결되어 있지 않다"고 함 | 새 대화에서 커넥터를 켰는지, 커넥터를 등록한 계정이 맞는지 확인 |
-| 세션이 목록에 있는데 명령이 안 됨 | 목록이 알려 주는 이유 확인 (대부분 `--permission-mode default` 누락) |
+| 세션이 목록에 있는데 명령이 안 됨 | 목록이 알려 주는 이유 확인 (RC 꺼짐, 또는 acceptEdits 같은 허용되지 않는 모드) |
 | 아예 응답이 없음 | `voice-bridge service status`, 로그는 `~/Library/Logs/voice-bridge/` |
 
 ---
@@ -108,12 +109,15 @@ allowed_hosts = ["macmini.bridge.example.com"]
 | 종류 | 만드는 법 | 음성 명령 |
 |---|---|---|
 | 브리지 세션 | `voice-bridge add "이름" 폴더 --start` (설정 프리셋) | 가능 |
-| 백그라운드 세션 | `cd 폴더 && claude --bg -n "이름" --remote-control "이름" --permission-mode default` | 가능 (RC 켜짐 + 승인 필요 모드일 때) |
+| 백그라운드 세션 | `cd 폴더 && claude --bg -n "이름" --remote-control "이름"` | 가능 (RC 켜짐 + default·auto 모드일 때) |
 | 데스크톱 앱·터미널 세션 | Claude 데스크톱 앱 Code 탭 등 | 보기 전용 (입력 통로가 없음) |
 
 - 백그라운드 세션은 bridge 가 `claude attach <id>` 로 붙어 입력한다. 책상에서도 `claude attach <id>` 로 같은 세션을 쓸 수 있다
   (여러 곳에서 동시에 붙어도 됨). bridge 가 떨어져도 세션은 계속 돈다. 멈춘(`claude stop`) 세션에는 붙지 않는다(붙으면 깨어나므로).
-- **`--permission-mode default` 를 꼭 붙일 것.** 이 머신의 기본 모드는 auto 라서, 빼면 목록에는 보이지만 명령 불가로 표시된다.
+- **허용 권한 모드**: 기본은 `default`(작업마다 사람이 승인)와 `auto`(Claude 가 위험도를 판단해 안전한 것만 자동 실행).
+  `acceptEdits`·권한 우회(`bypassPermissions`)로 바뀐 세션에는 명령을 넣지 않는다. 설정으로 조정:
+  `allowed_permission_modes = ["default", "auto"]`, bridge 가 띄우는 세션의 모드는 `session_permission_mode = "default"`.
+  `bypassPermissions` 는 어떤 설정으로도 허용되지 않는다.
 - git 저장소 안의 백그라운드 세션은 파일을 고칠 때 `.claude/worktrees/<이름>` 작업 트리에서 고칠 수 있다(원본 폴더가 아님).
 - 실시간 상태(대기/작업 중/승인 대기)는 `claude agents --json` 의 idle/busy/waiting 을 따른다. 결과는 transcript 에서 읽는다.
 - 음성 명령에서 `!`(승인 없는 셸 실행)·`/`(슬래시 명령)로 시작하는 것과 제어문자는 받지 않는다.
@@ -141,8 +145,9 @@ voice-bridge service uninstall
 
 - **CLI 플래그**: 노션 문서의 `--rc` 는 실제로 `--remote-control [name]` (2.1.285 기준). 여기에
   `--session-id <uuid>` 를 함께 넘겨 bridge 가 transcript 파일을 처음부터 특정한다.
-- **권한 모드 `default` 고정**: 이 머신의 기본값이 auto 라서 `--permission-mode default` 를 강제로 넘긴다.
-  설정에서 `--permission-mode`·`--dangerously-skip-permissions` 를 넣으면 기동을 거부한다.
+- **권한 모드**: bridge 가 띄우는 세션은 `session_permission_mode`(기본 default)를 명시적으로 넘긴다 (이 머신의 CLI 기본값이 auto).
+  `claude_extra_args` 에 `--permission-mode`·`--dangerously-skip-permissions` 를 넣으면 기동을 거부한다.
+  2026-10-03: 사용자 결정으로 auto 모드 세션도 음성 명령 대상에 포함 (acceptEdits·권한 우회는 계속 제외).
 - **환경 변수**: Claude Code 안에서 bridge 를 띄우면 `CLAUDE_CODE_CHILD_SESSION` 등이 상속되어 자식 transcript 저장이
   꺼진다. 자식 env 에서 세션 표식만 제거하고 `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` 을 준다.
 - **기동 대화상자**: 온보딩 안내("Try the new fullscreen renderer?" 등)는 Esc(=거절)로 닫는다.

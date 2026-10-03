@@ -38,7 +38,7 @@ INSTRUCTIONS = """\
 이 서버는 한 머신의 Claude Code 세션에 명령을 넣고 결과를 받는다.
 세션 종류 (list_sessions 의 kind):
 - bridge: bridge 가 띄운 세션 — 명령 가능
-- background: 사용자가 claude --bg -n "이름" --remote-control "이름" --permission-mode default 로 띄운 세션 — 명령 가능
+- background: 사용자가 claude --bg -n "이름" --remote-control "이름" 으로 띄운 세션 — 명령 가능 (승인 필요·auto 모드)
 - desktop: 데스크톱 앱·다른 터미널 세션 — 보기 전용. 명령을 넣을 수 없으니 reason 대로 안내
 목록을 읽어 줄 때는 명령 불가 세션도 이름과 reason 을 함께 짧게 알린다.
 규칙:
@@ -46,7 +46,8 @@ INSTRUCTIONS = """\
 2. list_sessions 로 후보를 보여주고 "○○ 세션, 폴더 △△ - 맞습니까?" 로 확인. 예 → select_session 으로 고정, 아니오 → 다시 조회.
 3. 고정 후에는 send_command / get_result 로만 진행. 세션 변경은 사용자가 다시 지정할 때만.
 4. send_command 가 받아들여지면 "시작했습니다" 라고 짧게 알린다. 거부되면 상태만 알리고 재시도·큐잉하지 말 것.
-5. get_result 가 '승인 대기' 면 "승인이 필요합니다. Code 탭에서 확인해 주세요" 라고 알릴 것. 대신 승인하지 않는다.
+5. auto 모드 세션은 대부분 승인 없이 바로 실행된다. 되돌리기 어려운 작업(삭제·배포·전송 등)을 요청받으면 실행 전에 한 번 더 확인한다.
+   get_result 가 '승인 대기' 면 "승인이 필요합니다. Code 탭에서 확인해 주세요" 라고 알릴 것. 대신 승인하지 않는다.
    prompt_mismatch 가 있으면 결과를 확정하지 말고 Code 탭에서 확인하라고 안내한다.
    '!' 나 '/' 로 시작하는 명령은 받지 않는다 (말로 풀어서 요청).
 6. 사용자가 "멈춰" 하면 interrupt.

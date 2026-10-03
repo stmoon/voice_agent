@@ -152,7 +152,7 @@ def test_vanished_selected_background_is_unselected_and_not_reattached(manager, 
 
 @pytest.mark.req("P3-5")
 def test_ambiguous_candidates_explain_commandability(manager, fake_config, workdir):
-    make_bg(fake_config, "위키", workdir, mode="auto")
+    make_bg(fake_config, "위키", workdir, mode="acceptEdits")
     make_bg(fake_config, "위키", workdir)
     manager.list_sessions()
     with pytest.raises(BridgeError) as e:
@@ -204,7 +204,7 @@ def test_turn_after_prefers_matching_prompt():
 def test_desktop_entries_report_rc_and_correct_guidance(manager, fake_config, workdir):
     make_desktop(fake_config, "RC없는터미널", workdir)
     d = by_name(manager.list_sessions(), "RC없는터미널")
-    assert d["rc_url"] is None and "Remote Control 도 꺼져" in d["reason"] and "--permission-mode default" in d["reason"]
+    assert d["rc_url"] is None and "Remote Control 도 꺼져" in d["reason"] and "claude --bg" in d["reason"]
 
 
 @pytest.mark.req("P3-5")
