@@ -7,3 +7,4 @@ reports/
 build/
 *.egg-info/
 .claude/worktrees/
+.claude/settings.local.json
