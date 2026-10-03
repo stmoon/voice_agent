@@ -126,8 +126,9 @@ class KillOnCloseJob:
             self.handle = job
 
     def add(self, popen: subprocess.Popen) -> bool:
-        if not self.handle:
+        handle = getattr(popen, "_handle", None)  # 진짜 Popen 만 프로세스 핸들이 있다
+        if not self.handle or handle is None:
             return False
         import ctypes
 
-        return bool(ctypes.windll.kernel32.AssignProcessToJobObject(self.handle, int(popen._handle)))
+        return bool(ctypes.windll.kernel32.AssignProcessToJobObject(self.handle, int(handle)))

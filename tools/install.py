@@ -50,10 +50,31 @@ def venv_bin(prefix: Path, name: str) -> Path:
     return d / (name + (".exe" if os.name == "nt" else ""))
 
 
+def make_shim(prefix: Path, shim_dir: Path) -> Path | None:
+    """어디서든 `voice-bridge` 로 부를 수 있게 shim_dir(기본 ~/.local/bin, claude 공식 설치와 같은 곳)에 실행 링크를 둔다."""
+    exe = venv_bin(prefix, "voice-bridge")
+    shim_dir.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        shim = shim_dir / "voice-bridge.cmd"
+        shim.write_text(f'@"{exe}" %*\r\n', encoding="utf-8")
+        return shim
+    shim = shim_dir / "voice-bridge"
+    if shim.is_symlink() or not shim.exists():
+        if shim.is_symlink():
+            shim.unlink()
+        shim.symlink_to(exe)
+        return shim
+    print(f"[install] {shim} 가 이미 있어 그대로 둡니다 (다른 파일).")
+    return None
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--prefix", type=Path, default=default_prefix())
     ap.add_argument("--editable", action="store_true", help="레포를 편집 가능 모드로 설치 (개발용)")
+    ap.add_argument("--shim-dir", type=Path, default=Path.home() / ".local" / "bin",
+                    help="voice-bridge 실행 링크를 둘 폴더 (PATH 에 있어야 함)")
+    ap.add_argument("--no-shim", action="store_true", help="실행 링크를 만들지 않음")
     a = ap.parse_args(argv)
 
     if sys.version_info < (3, 11):
@@ -78,12 +99,18 @@ def main(argv=None) -> int:
         print(f"[install] 기본 설정 생성: {cfg}")
 
     exe = venv_bin(prefix, "voice-bridge")
+    if not a.no_shim:
+        shim = make_shim(prefix, a.shim_dir)
+        if shim:
+            on_path = str(a.shim_dir) in os.environ.get("PATH", "").split(os.pathsep)
+            print(f"[install] 실행 링크: {shim}" + ("" if on_path else f"  (PATH 에 {a.shim_dir} 를 추가하세요)"))
+            if on_path:
+                exe = Path("voice-bridge")
     print("\n[install] 완료. 다음 단계 (README '사용 방법' 참고):")
     if os.name == "nt":
         print("  0) winget install Cloudflare.cloudflared   # 없으면 (설치 뒤 새 터미널)")
-    print(f"  1) {exe} token init          # 접속 토큰 → OS 보안 저장소 (Windows: 자격 증명 관리자)")
-    print(f"  2) {exe} service install     # 브리지·터널 자동 실행 (macOS launchd / Windows 작업 스케줄러 / Linux systemd)")
-    print(f"  3) {exe} url                 # 커넥터 주소 → claude.ai 설정 → 커넥터에 등록")
+    print(f"  1) {exe} setup                       # 토큰 + 자동 실행 + 커넥터 주소 (한 번)")
+    print(f"  2) {exe} session new \"이름\" 작업폴더   # 휴대폰에서 부를 세션 만들기")
     return 0
 
 

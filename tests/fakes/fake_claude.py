@@ -335,6 +335,14 @@ def main():
         return cmd_agents()
     if "--bg" in args:
         return cmd_bg()
+    if args[:1] == ["stop"]:   # 백그라운드 세션 멈춤 = 목록에서 빠짐
+        for f in os.listdir(REG):
+            if f.endswith(".json") and _read_json(os.path.join(REG, f)).get("id") == args[1]:
+                os.remove(os.path.join(REG, f))
+                print(f"stopped {args[1]}")
+                return
+        print(f"no session {args[1]}")
+        sys.exit(1)
     if args[:1] == ["attach"]:
         e = next((x for x in (_read_json(os.path.join(REG, f)) for f in os.listdir(REG) if f.endswith(".json"))
                   if x.get("id") == args[1]), None)

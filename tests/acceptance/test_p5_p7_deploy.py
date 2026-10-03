@@ -69,9 +69,12 @@ def test_mcp_call_through_external_domain():
 def test_installer_creates_working_install(tmp_path):
     prefix = tmp_path / "inst"
     env = {**os.environ, "VC_CONFIG": str(tmp_path / "cfg" / "config.toml")}
-    r = subprocess.run([sys.executable, str(ROOT / "tools" / "install.py"), "--prefix", str(prefix)],
+    r = subprocess.run([sys.executable, str(ROOT / "tools" / "install.py"), "--prefix", str(prefix),
+                        "--shim-dir", str(tmp_path / "bin")],
                        env=env, capture_output=True, text=True, timeout=600)
     assert r.returncode == 0, r.stdout + r.stderr
+    shim = tmp_path / "bin" / ("voice-bridge.cmd" if os.name == "nt" else "voice-bridge")
+    assert shim.exists()
     assert (tmp_path / "cfg" / "config.toml").exists()
     exe = prefix / "venv" / ("Scripts" if os.name == "nt" else "bin") / ("voice-bridge" + (".exe" if os.name == "nt" else ""))
     info = subprocess.run([str(exe), "info"], env=env, capture_output=True, text=True, timeout=60)
@@ -79,7 +82,7 @@ def test_installer_creates_working_install(tmp_path):
     assert "listen" in info.stdout and "8765" in info.stdout
     # 재실행해도 설정을 덮어쓰지 않음
     (tmp_path / "cfg" / "config.toml").write_text('port = 9999\n')
-    r2 = subprocess.run([sys.executable, str(ROOT / "tools" / "install.py"), "--prefix", str(prefix)],
+    r2 = subprocess.run([sys.executable, str(ROOT / "tools" / "install.py"), "--prefix", str(prefix), "--no-shim"],
                         env=env, capture_output=True, text=True, timeout=600)
     assert r2.returncode == 0 and (tmp_path / "cfg" / "config.toml").read_text() == 'port = 9999\n'
 

@@ -209,6 +209,22 @@ def cmd_add(args, cfg: BridgeConfig) -> int:
     return 0
 
 
+def cmd_setup(args, cfg: BridgeConfig) -> int:
+    from .sessions_cli import setup
+
+    return setup(cfg)
+
+
+def cmd_session(args, cfg: BridgeConfig) -> int:
+    from . import sessions_cli as sc
+
+    if args.action == "new":
+        return sc.session_new(cfg, args.name, args.folder, chrome=args.chrome, approve=args.approve)
+    if args.action == "stop":
+        return sc.session_stop(cfg, args.name)
+    return sc.session_list(cfg)
+
+
 def cmd_info(args, cfg: BridgeConfig) -> int:
     print(f"config    : {default_config_path()}")
     print(f"host_id   : {cfg.host_id}")
@@ -238,6 +254,17 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("action", choices=["init", "set-notion"])
     sub.add_parser("info")
     sub.add_parser("url", help="커넥터 주소(토큰 포함) 출력")
+    sub.add_parser("setup", help="처음 한 번: 토큰(없을 때만) + 자동 실행 + 커넥터 주소")
+    se = sub.add_parser("session", help="음성으로 쓸 세션 만들기·목록·멈추기")
+    sesub = se.add_subparsers(dest="action", required=True)
+    sn = sesub.add_parser("new", help="백그라운드 세션 만들기 (claude --bg --remote-control)")
+    sn.add_argument("name", help="휴대폰에서 부를 이름")
+    sn.add_argument("folder", nargs="?", help="작업 폴더 (기본: 지금 폴더)")
+    sn.add_argument("--chrome", action="store_true", help="Claude in Chrome 으로 크롬 조작")
+    sn.add_argument("--approve", action="store_true", help="작업마다 승인 (기본은 이 머신의 기본 모드, 보통 auto)")
+    sesub.add_parser("list", help="세션 목록")
+    sst = sesub.add_parser("stop", help="백그라운드 세션 멈추기")
+    sst.add_argument("name")
     ad = sub.add_parser("add", help="세션 프리셋 추가 (브리지 재시작 불필요)")
     ad.add_argument("name", help="음성으로 부를 세션 이름")
     ad.add_argument("folder", help="작업 폴더")
@@ -252,6 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         _redirect_output(args.log)
     cfg = BridgeConfig.load()
     return {"serve": cmd_serve, "token": cmd_token, "info": cmd_info, "url": cmd_url, "add": cmd_add,
+            "setup": cmd_setup, "session": cmd_session,
             "tunnel": cmd_tunnel, "service": cmd_service}[args.cmd](args, cfg)
 
 
