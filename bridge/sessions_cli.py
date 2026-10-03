@@ -12,7 +12,8 @@ import sys
 import time
 from pathlib import Path
 
-from .config import BridgeConfig, claude_trusts
+from . import transcript as tr
+from .config import BridgeConfig, claude_trusts, trust_hint
 
 
 def _agents(cfg: BridgeConfig) -> list[dict]:
@@ -37,7 +38,7 @@ def session_new(cfg: BridgeConfig, name: str, folder: str | None, chrome: bool =
         print(f"폴더가 없습니다: {path}", file=sys.stderr)
         return 1
     if claude_trusts(str(path)) is False:
-        print(f"claude 가 아직 이 폴더를 신뢰하지 않았습니다. 먼저 한 번 실행해 '신뢰'를 고르세요:\n  cd \"{path}\" && claude")
+        print(trust_hint(str(path)))
         return 1
     same = [a for a in _agents(cfg) if a.get("name") == name]
     if same:
@@ -49,7 +50,13 @@ def session_new(cfg: BridgeConfig, name: str, folder: str | None, chrome: bool =
         argv.append("--chrome")
     if approve:
         argv += ["--permission-mode", "default"]
-    r = run_quiet(argv, env=child_env(), cwd=str(path), text=True, timeout=120)
+    try:
+        r = run_quiet(argv, env=child_env(), cwd=str(path), text=True, timeout=120)
+    except FileNotFoundError:
+        from .agents import not_found_message
+
+        print(not_found_message(cfg.claude_bin), file=sys.stderr)
+        return 1
     out = (r.stdout or "") + (r.stderr or "")
     if r.returncode != 0 or "backgrounded" not in out:
         print(f"세션을 띄우지 못했습니다:\n{out.strip()}", file=sys.stderr)
@@ -69,20 +76,24 @@ def _report_ready(cfg: BridgeConfig, name: str, wait: float) -> int:
     d = None
     while time.time() < end:
         d = next((x for x in m.list_sessions() if x["name"] == name), None)
-        if d and (d["commandable"] or "Remote Control" in (d.get("reason") or "") and time.time() > end - wait / 2):
+        reason = (d or {}).get("reason") or ""
+        if d and (d["commandable"] or tr.login_needed(reason)   # 로그인 문제는 기다려도 풀리지 않는다
+                  or "Remote Control" in reason and time.time() > end - wait / 2):
             break
         time.sleep(2)
     m.shutdown()
     if d and d["commandable"]:
         print(f"준비됨: '{name}' ({d.get('permission_mode_ko')}) — 휴대폰에서 \"{name} 세션으로 하자\"")
         return 0
-    print(f"아직 음성 명령을 받을 수 없습니다: {(d or {}).get('reason') or 'RC 연결 대기 중'}\n"
-          f"잠시 뒤 voice-bridge session list 로 다시 확인하세요. RC 가 계속 안 붙으면 멈춘 뒤 잠깐 기다렸다가 한 번만 다시 만드세요.")
+    reason = (d or {}).get("reason") or "RC 연결 대기 중"
+    print(f"아직 음성 명령을 받을 수 없습니다: {reason}")
+    if not tr.login_needed(reason):
+        print("잠시 뒤 voice-bridge session list 로 다시 확인하세요. RC 가 계속 안 붙으면 멈춘 뒤 잠깐 기다렸다가 한 번만 다시 만드세요.")
     return 2
 
 
-def _bridge_list(cfg: BridgeConfig) -> list[dict] | None:
-    """실행 중인 브리지에 목록을 묻는다 (브리지가 띄운 세션까지 정확히 나옴). 브리지가 없으면 None."""
+def _bridge_list(cfg: BridgeConfig) -> tuple[list[dict], str | None] | None:
+    """실행 중인 브리지에 목록을 묻는다 (브리지가 띄운 세션까지 정확히 나옴). (세션 목록, 경고). 브리지가 없으면 None."""
     import asyncio
     import json as _json
 
@@ -98,7 +109,7 @@ def _bridge_list(cfg: BridgeConfig) -> list[dict] | None:
 
         async with Client(f"http://127.0.0.1:{cfg.port}/t/{tok}/mcp") as c:
             r = _json.loads((await c.call_tool("list_sessions", {})).content[0].text)
-            return r.get("sessions")
+            return (r["sessions"], r.get("warning")) if isinstance(r.get("sessions"), list) else None
 
     try:
         return asyncio.run(asyncio.wait_for(go(), timeout=15))
@@ -111,13 +122,18 @@ def session_list(cfg: BridgeConfig, ask_bridge: bool = True) -> int:
 
     from .session_manager import SessionManager
 
-    rows = _bridge_list(cfg) if ask_bridge else None
-    if rows is None:
+    got = _bridge_list(cfg) if ask_bridge else None
+    if got is None:
         m = SessionManager(BridgeConfig(**{**cfg.__dict__, "state_dir": Path(tempfile.mkdtemp())}))
         try:
             rows = m.list_sessions()
+            warning = f"이 머신의 세션 목록을 읽지 못했습니다: {m.agents.error}" if m.agents.error else None
         finally:
             m.shutdown()
+    else:
+        rows, warning = got
+    if warning:  # claude 가 없거나 오래됨 → "세션이 없다"로 오해하지 않게 먼저
+        print(f"경고: {warning}")
     if not rows:
         print("실행 중인 세션이 없습니다.")
     for d in rows:
@@ -127,7 +143,8 @@ def session_list(cfg: BridgeConfig, ask_bridge: bool = True) -> int:
         mark = "가능" if d["commandable"] else "불가"
         print(f"- {d['name']}  [{d['kind_ko']}] {d['status_ko']} · 음성 명령 {mark}"
               + (f" · {d.get('permission_mode_ko')}" if d.get("permission_mode") else "")
-              + (f"\n    {d['reason']}" if not d["commandable"] and d.get("reason") else ""))
+              + (f"\n    {d['reason']}" if not d["commandable"] and d.get("reason") else "")
+              + (f"\n    {d['warning']}" if d["commandable"] and d.get("warning") else ""))
     return 0
 
 

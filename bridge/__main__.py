@@ -176,7 +176,7 @@ def cmd_service(args, cfg: BridgeConfig) -> int:
 def cmd_add(args, cfg: BridgeConfig) -> int:
     from pathlib import Path
 
-    from .config import add_preset, claude_trusts
+    from .config import add_preset, claude_trusts, trust_hint
 
     folder = Path(args.folder).expanduser().resolve()
     if not folder.is_dir():
@@ -186,7 +186,7 @@ def cmd_add(args, cfg: BridgeConfig) -> int:
     print(f"추가: \"{args.name}\" = {folder}" + ("  (자동 기동)" if args.autostart else ""))
     trusted = claude_trusts(str(folder))
     if trusted is False:
-        print(f"주의: claude 가 아직 이 폴더를 신뢰하지 않았습니다. 한 번 실행해 '신뢰'를 고르세요:\n  cd {folder} && claude")
+        print("주의: " + trust_hint(str(folder)))
     if args.start:
         if trusted is False:
             print("폴더 신뢰 전이라 지금은 띄우지 않았습니다.")

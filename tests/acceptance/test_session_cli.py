@@ -100,8 +100,53 @@ def test_list_prefers_running_bridge(cfg, monkeypatch, capsys):
              "permission_mode": "default", "permission_mode_ko": "승인 필요"},
             {"name": "데스크톱", "kind": "desktop", "kind_ko": "데스크톱 앱·터미널 세션", "status_ko": "대기",
              "commandable": False, "reason": "아주 긴 안내 문구"}]
-    monkeypatch.setattr(sc, "_bridge_list", lambda c: rows)
+    monkeypatch.setattr(sc, "_bridge_list", lambda c: (rows, None))
     assert sc.session_list(cfg) == 0
     out = capsys.readouterr().out
     assert "시험  [브리지 세션] 대기 · 음성 명령 가능 · 승인 필요" in out
     assert "데스크톱  [데스크톱 앱·터미널 세션] 대기 · 보기 전용" in out and "아주 긴 안내" not in out
+    assert "경고" not in out
+
+
+# ---- Windows 실기에서 나온 문제 (2026-10-04) ----
+
+MISSING = ["vb-no-such-claude-cli"]
+
+
+def test_trust_hint_works_in_powershell(cfg, tmp_path, monkeypatch, capsys):
+    """PowerShell 5.1 은 `&&` 를 못 쓴다 → 안내 명령을 그대로 붙여 넣어도 되도록 두 줄로."""
+    monkeypatch.setattr(sc, "claude_trusts", lambda p: False)
+    (tmp_path / "w").mkdir()
+    assert sc.session_new(cfg, "x", str(tmp_path / "w"), wait=1) == 1
+    out = capsys.readouterr().out
+    assert "&&" not in out and f'cd "{(tmp_path / "w").resolve()}"' in out and "\n  claude" in out
+
+
+def test_new_session_without_claude_explains(cfg, tmp_path, capsys):
+    (tmp_path / "w").mkdir()
+    cfg.claude_bin = MISSING
+    assert sc.session_new(cfg, "x", str(tmp_path / "w"), wait=1) == 1   # traceback 이 아니라 안내
+    assert "찾을 수 없습니다" in capsys.readouterr().err
+
+
+def test_list_shows_warning_instead_of_silent_empty(cfg, monkeypatch, capsys):
+    cfg.claude_bin = MISSING
+    assert sc.session_list(cfg, ask_bridge=False) == 0
+    out = capsys.readouterr().out
+    assert "경고: 이 머신의 세션 목록을 읽지 못했습니다" in out and "찾을 수 없습니다" in out
+    monkeypatch.setattr(sc, "_bridge_list", lambda c: ([], "claude CLI 가 너무 오래되었습니다"))
+    assert sc.session_list(cfg) == 0
+    assert "경고: claude CLI 가 너무 오래되었습니다" in capsys.readouterr().out
+
+
+def test_new_session_with_invalid_login_says_login_now(cfg, tmp_path, monkeypatch, capsys):
+    """로그인이 무효면 RC 는 기다려도 붙지 않는다 → 바로 `claude /login` 을 안내하고, '다시 만드세요' 는 말하지 않는다."""
+    monkeypatch.setenv("FAKE_LOGIN_INVALID", "1")
+    (tmp_path / "w").mkdir()
+    import time
+
+    t = time.time()
+    assert sc.session_new(cfg, "만료", str(tmp_path / "w"), wait=30) == 2
+    assert time.time() - t < 20
+    out = capsys.readouterr().out
+    assert "claude /login" in out and "다시 만드세요" not in out

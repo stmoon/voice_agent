@@ -167,6 +167,12 @@ def add_preset(path: Path, name: str, folder: str, autostart: bool = False) -> N
     path.write_text(out, encoding="utf-8")
 
 
+def trust_hint(folder: str) -> str:
+    """폴더 신뢰 안내. 명령을 두 줄로 쓴다 (Windows PowerShell 5.1 은 `&&` 를 쓸 수 없어 붙여 넣으면 오류)."""
+    return (f"claude 가 아직 이 폴더를 신뢰하지 않았습니다. 그 폴더에서 claude 를 한 번 실행해 '신뢰'를 고르세요:\n"
+            f"  cd \"{folder}\"\n  claude")
+
+
 def claude_trusts(folder: str) -> bool | None:
     """claude 가 이 폴더(또는 상위 폴더)를 신뢰했는지 ~/.claude.json 으로 확인. 알 수 없으면 None."""
     import json
