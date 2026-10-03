@@ -4,7 +4,7 @@
 
 ## 확인 필요 (실기)
 
-- [ ] **Windows PC 에서 실제 사용** — 자동 테스트(CI)는 통과, 실기에서 아래를 확인
+- [ ] **Windows PC 에서 실제 사용** — 다른 작업에서 진행 중 (2026-10-04~). CI 는 실패 1건 수정 후 재확인 필요
   - [ ] `scripts\install.ps1` 로 설치 → 작업 스케줄러 등록이 일반 권한으로 되는지, 창 없이 뜨는지, 꺼지면 1분 안에 다시 뜨는지
   - [ ] `claude --bg` / `claude attach` / `claude agents --json` 이 Windows 에서도 macOS 와 같이 동작하는지
   - [ ] ConPTY 를 거친 Esc(중단)·Ctrl+U(입력창 비우기)·Enter 가 Claude Code 에 의도대로 들어가는지
