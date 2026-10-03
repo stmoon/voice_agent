@@ -154,3 +154,15 @@ def test_url_command_builds_connector_url(tmp_path, monkeypatch, capsys):
         assert cli.cmd_url(None, BridgeConfig()) == 2
     finally:
         keyring.set_keyring(old)
+
+
+@pytest.mark.req("P7-1")
+def test_imports_work_outside_repo(tmp_path):
+    """launchd 는 홈 폴더에서 실행한다. 편집 가능 설치에선 bridge 가 네임스페이스 패키지로 잡혀
+    bridge/__init__.py 가 실행되지 않으므로, 거기에 기대는 코드가 있으면 재시작 루프에 빠진다(실측)."""
+    code = ("from bridge.mcp_server import BRIDGE_VERSION, build_app\n"
+            "from bridge.__main__ import main\n"
+            "from bridge import service, session_manager, agents, auth\n"
+            "print(BRIDGE_VERSION)")
+    r = subprocess.run([sys.executable, "-c", code], cwd=tmp_path, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr

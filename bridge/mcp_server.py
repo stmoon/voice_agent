@@ -15,10 +15,15 @@ from .session_manager import BridgeError, SessionManager
 def _version() -> str:
     """실행 중인 코드의 git 커밋 (예전 코드가 응답하는지 휴대폰에서도 알 수 있게)."""
     import subprocess
+    from importlib.metadata import PackageNotFoundError, version
     from pathlib import Path
 
-    from . import __version__
-
+    # bridge/__init__.py 에 기대지 않는다: 편집 가능 설치를 레포 밖(launchd 작업 폴더=홈)에서 쓰면
+    # bridge 가 네임스페이스 패키지로 잡혀 __init__.py 가 실행되지 않는다 (실측: 재시작 루프)
+    try:
+        __version__ = version("voice-bridge")
+    except PackageNotFoundError:
+        __version__ = "0.0.0"
     try:
         h = subprocess.run(["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "--short", "HEAD"],
                            capture_output=True, text=True, timeout=5).stdout.strip()
