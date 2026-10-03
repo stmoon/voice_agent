@@ -12,7 +12,11 @@
     PERM  → 권한 요청 후 'y' 입력 대기 (대화상자는 정적: 출력 없음)
     그 외 → 즉시 응답 "ECHO: <프롬프트>"
 - 입력창: Ctrl+U = 현재 줄 지우기, Backspace = 한 글자 지우기, bracketed paste 의 줄바꿈은 제출 아님
-환경변수 FAKE_DIALOG=1 기동 시 온보딩 대화상자, FAKE_TRUST=1 폴더 신뢰 대화상자, FAKE_NO_PERM_HOOKS=1 권한 훅 미발생.
+- `agents --json`: 실행 중 세션 목록 (등록부 $CLAUDE_CONFIG_DIR/fake_agents/*.json). status = idle/busy/waiting
+- `--bg -n 이름 --remote-control 이름`: 백그라운드 세션 등록 후 바로 종료 (transcript 에 권한 모드·RC 기록)
+- `attach <id>`: 백그라운드 세션에 붙은 화면. 대기 표시는 "⏸ manual mode on · ← for agents" (실측)
+환경변수 FAKE_DIALOG=1 기동 시 온보딩 대화상자, FAKE_TRUST=1 폴더 신뢰 대화상자, FAKE_NO_PERM_HOOKS=1 권한 훅 미발생,
+FAKE_NO_RC=1 RC 미연결, FAKE_AGENTS_FAIL=1 agents 조회 실패.
 """
 import json
 import os
@@ -33,15 +37,87 @@ def opt(name, default=None):
     return args[args.index(name) + 1] if name in args else default
 
 
+CFG = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+REG = os.path.join(CFG, "fake_agents")
+os.makedirs(REG, exist_ok=True)
 SID = opt("--session-id") or str(uuid.uuid4())
 NAME = opt("--remote-control", "")
 SETTINGS = json.load(open(opt("--settings"))) if opt("--settings") else {}
-CWD = os.getcwd()
-CFG = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-PROJ = os.path.join(CFG, "projects", re.sub(r"[^A-Za-z0-9]", "-", CWD))
-os.makedirs(PROJ, exist_ok=True)
-TRANSCRIPT = os.path.join(PROJ, SID + ".jsonl")
+ATTACH = False
+CWD = TRANSCRIPT = None
 last_uuid = None
+
+
+def setup_paths(cwd, sid):
+    global CWD, TRANSCRIPT, SID
+    CWD, SID = cwd, sid
+    proj = os.path.join(CFG, "projects", re.sub(r"[^A-Za-z0-9]", "-", cwd))
+    os.makedirs(proj, exist_ok=True)
+    TRANSCRIPT = os.path.join(proj, sid + ".jsonl")
+
+
+# ---------- 등록부 (claude agents 흉내) ----------
+
+def reg_path(sid):
+    return os.path.join(REG, sid + ".json")
+
+
+def reg_load(sid):
+    try:
+        return json.load(open(reg_path(sid)))
+    except (OSError, ValueError):
+        return None
+
+
+def reg_save(entry):
+    tmp = reg_path(entry["sessionId"]) + ".tmp"
+    json.dump(entry, open(tmp, "w"), ensure_ascii=False)
+    os.replace(tmp, reg_path(entry["sessionId"]))
+
+
+def set_status(status):
+    e = reg_load(SID)
+    if e is not None:
+        e["status"] = status
+        reg_save(e)
+
+
+def alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def cmd_agents():
+    if os.environ.get("FAKE_AGENTS_FAIL") == "1":
+        sys.exit(1)
+    out_list = []
+    for f in sorted(os.listdir(REG)):
+        if not f.endswith(".json"):
+            continue
+        try:
+            e = json.load(open(os.path.join(REG, f)))
+        except (OSError, ValueError):
+            continue
+        if e.get("kind") == "interactive" and e.get("pid") is not None and not alive(e["pid"]):
+            continue  # 끝난 대화형 세션
+        out_list.append(e)
+    print(json.dumps(out_list, ensure_ascii=False))
+
+
+def cmd_bg():
+    name = opt("-n") or opt("--name")
+    short = uuid.uuid4().hex[:8]
+    sid = short + "-0000-4000-8000-" + uuid.uuid4().hex[:12]
+    setup_paths(os.getcwd(), sid)
+    rec({"type": "permission-mode", "permissionMode": opt("--permission-mode", "default")})
+    if "--remote-control" in args and os.environ.get("FAKE_NO_RC") != "1":
+        rec({"type": "system", "subtype": "bridge_status", "url": f"https://claude.ai/code/session_fake{short}"})
+    reg_save({"id": short, "cwd": CWD, "kind": "background", "sessionId": sid, "name": name or short,
+              "status": "idle", "state": "blocked", "startedAt": int(time.time() * 1000)})
+    print(f"backgrounded · {short}" + (f" · {name}" if name else "") + " (idle — send a prompt to start)")
 
 
 def now():
@@ -74,7 +150,9 @@ def out(s):
 
 
 def idle_screen():
-    out("\r\n\x1b[2m────────\x1b[0m\r\n❯ \r\n\x1b[2m⏸ manual mode on · ? for shortcuts\x1b[0m\r\n")
+    set_status("idle")
+    footer = "⏸ manual mode on · ← for agents" if ATTACH else "⏸ manual mode on · ? for shortcuts"
+    out(f"\r\n\x1b[2m────────\x1b[0m\r\n❯ \r\n\x1b[2m{footer}\x1b[0m\r\n")
 
 
 def assistant(content, stop):
@@ -125,6 +203,7 @@ def dialog(text):
 def run_prompt(text):
     """반환값: 입력창에 되돌려 놓을 텍스트 (THINK 중단 시)."""
     rec({"type": "user", "message": {"role": "user", "content": text}, "promptId": str(uuid.uuid4())})
+    set_status("busy")
     hook("UserPromptSubmit", prompt=text)
     if "THINK" in text:
         if wait_key(["\x1b"], 30, spinner=True):
@@ -153,7 +232,9 @@ def run_prompt(text):
             hook("Notification", message="Claude needs your permission to use Bash",
                  notification_type="permission_prompt")
         out("\r\nDo you want to proceed?\r\n❯ 1. Yes\r\n  2. No\r\n\r\nEsc to cancel\r\n")
+        set_status("waiting")
         k = wait_key(["y", "\x1b"], 60)
+        set_status("busy")
         if k == "y":
             rec({"type": "user", "message": {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": tid, "content": "removed"}]}})
@@ -172,18 +253,43 @@ def run_prompt(text):
 
 
 def main():
+    global ATTACH, NAME
+    import signal
+
+    signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))  # 종료돼도 finally(등록부 정리) 실행
+    signal.signal(signal.SIGHUP, lambda *a: sys.exit(0))
+    if args[:2] == ["agents", "--json"]:
+        return cmd_agents()
+    if "--bg" in args:
+        return cmd_bg()
+    if args[:1] == ["attach"]:
+        e = next((json.load(open(os.path.join(REG, f))) for f in os.listdir(REG)
+                  if f.endswith(".json") and json.load(open(os.path.join(REG, f))).get("id") == args[1]), None)
+        if e is None:
+            print(f"no background session {args[1]}")
+            sys.exit(1)
+        ATTACH, NAME = True, e["name"]
+        os.chdir(e["cwd"])
+        setup_paths(e["cwd"], e["sessionId"])
+    else:
+        setup_paths(os.getcwd(), SID)
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     tty.setraw(fd)
     try:
         out(f"Claude Code (fake) · RC: {NAME}\r\n")
-        if os.environ.get("FAKE_TRUST") == "1":
-            if dialog("Quick safety check: Is this a project you created or one you trust?") == "esc":
-                return
-        rec({"type": "permission-mode", "permissionMode": opt("--permission-mode", "auto")})
-        hook("SessionStart", source="startup")
-        if os.environ.get("FAKE_DIALOG") == "1":
-            dialog("Try the new fullscreen renderer?")
+        if not ATTACH:
+            if os.environ.get("FAKE_TRUST") == "1":
+                if dialog("Quick safety check: Is this a project you created or one you trust?") == "esc":
+                    return
+            reg_save({"pid": os.getpid(), "cwd": CWD, "kind": "interactive", "sessionId": SID, "name": NAME or SID[:8],
+                      "status": "idle", "startedAt": int(time.time() * 1000)})
+            rec({"type": "permission-mode", "permissionMode": opt("--permission-mode", "auto")})
+            if NAME and os.environ.get("FAKE_NO_RC") != "1":
+                rec({"type": "system", "subtype": "bridge_status", "url": f"https://claude.ai/code/session_fake{SID[:8]}"})
+            hook("SessionStart", source="startup")
+            if os.environ.get("FAKE_DIALOG") == "1":
+                dialog("Try the new fullscreen renderer?")
         idle_screen()
         buf = ""
         while True:
@@ -209,6 +315,13 @@ def main():
                     buf += ch
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        if ATTACH:
+            set_status("idle")      # 떨어져도 백그라운드 세션은 남는다
+        else:
+            try:
+                os.remove(reg_path(SID))
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

@@ -12,12 +12,16 @@ from .config import BridgeConfig
 from .session_manager import BridgeError, SessionManager
 
 INSTRUCTIONS = """\
-이 서버는 한 머신에서 bridge 가 띄운 Claude Code Remote Control(RC) 세션에 명령을 넣고 결과를 받는다.
+이 서버는 한 머신의 Claude Code 세션에 명령을 넣고 결과를 받는다.
+세션 종류 (list_sessions 의 kind):
+- bridge: bridge 가 띄운 세션 — 명령 가능
+- background: 사용자가 claude --bg --remote-control 로 띄운 세션 — 명령 가능 (RC 켜짐 + 승인 필요 모드일 때)
+- desktop: 데스크톱 앱·다른 터미널 세션 — 보기 전용. 명령을 넣을 수 없으니 "Code 탭에서 직접 입력하세요" 라고 안내
 규칙:
 1. 세션 지정은 사용자가 명시적으로 한다. 추론해서 고르지 말 것.
-2. list_sessions 로 후보를 보여주고 "○○ 세션, 폴더 △△ - 맞습니까?" 로 확인을 받은 뒤 select_session 으로 고정.
+2. list_sessions 로 후보를 보여주고 "○○ 세션, 폴더 △△ - 맞습니까?" 로 확인. 예 → select_session 으로 고정, 아니오 → 다시 조회.
 3. 고정 후에는 send_command / get_result 로만 진행. 세션 변경은 사용자가 다시 지정할 때만.
-4. send_command 는 세션이 '대기' 일 때만 들어간다. 거부되면 상태만 알리고 재시도·큐잉하지 말 것.
+4. send_command 가 받아들여지면 "시작했습니다" 라고 짧게 알린다. 거부되면 상태만 알리고 재시도·큐잉하지 말 것.
 5. get_result 가 '승인 대기' 면 "승인이 필요합니다. Code 탭에서 확인해 주세요" 라고 알릴 것. 대신 승인하지 않는다.
 6. 사용자가 "멈춰" 하면 interrupt.
 결과 보고는 음성용으로 짧게 요약한다.
@@ -43,14 +47,15 @@ def build_mcp(manager: SessionManager) -> MCPServer:
 
     @mcp.tool()
     async def list_sessions() -> dict:
-        """이 머신에서 bridge 가 띄운 RC 세션 목록 (이름, 작업 폴더, 호스트명, 상태: 대기/작업 중/승인 대기)."""
+        """이 머신의 모든 Claude Code 세션 (이름, 작업 폴더, 호스트명, 상태: 대기/작업 중/승인 대기, 종류, 명령 가능 여부)."""
         sessions = await call(manager.list_sessions)
         return {"ok": True, "host": manager.config.host_id, "sessions": sessions,
                 "presets": sorted(manager.config.sessions)}
 
     @mcp.tool()
     async def select_session(name: str) -> dict:
-        """대상 세션 1개를 서버 측에 고정한다. 사용자에게 확인을 받은 뒤에만 호출."""
+        """대상 세션 1개를 서버 측에 고정한다 (이름 또는 session_id). 사용자에게 확인을 받은 뒤에만 호출.
+        보기 전용(desktop) 세션은 고정할 수 없다."""
         r = await call(manager.select_session, name)
         return r if r.get("ok") is False else {"ok": True, "selected": r}
 

@@ -1,10 +1,17 @@
-"""세션 관리자: bridge 가 직접 띄운 RC 세션들의 등록·고정·명령 주입·결과 회수.
+"""세션 관리자: RC 세션들의 목록·고정·명령 주입·결과 회수.
 
-규칙 (노션 요구사항):
-- bridge 는 자신이 띄운 세션에만 주입한다 (임의 터미널 접근 없음)
+세션 종류
+- bridge     : bridge 가 직접 띄운 세션 (PTY 의 stdin 을 쥠)
+- background : 사용자가 `claude --bg --remote-control` 로 띄운 백그라운드 세션. `claude attach <id>` 를
+               bridge 의 PTY 로 열어 입력한다 (여러 곳에서 동시에 붙어도 됨, 떨어져도 세션은 계속 돔)
+- desktop    : 데스크톱 앱·다른 터미널의 대화형 세션. 입력 통로가 없어 **보기 전용** (목록에만 표시)
+
+규칙 (노션 요구사항)
+- 주입 대상은 bridge 가 띄운 세션, 또는 RC 가 켜지고 권한 모드가 default 인 백그라운드 세션뿐
+  (데스크톱 앱 세션·임의 터미널에는 주입하지 않음)
 - 세션 지정은 명시적 select 로만. 고정 없이 send 하면 거부
 - 대기 상태일 때만 주입. 작업 중·승인 대기면 거부하고 상태만 알림. 큐잉 없음
-- 권한 모드는 default 고정
+- 실시간 상태는 `claude agents` (idle/busy/waiting) 를 우선 쓰고, 결과는 transcript 에서 읽는다
 """
 from __future__ import annotations
 
@@ -16,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import transcript as tr
+from .agents import AgentsCache
 from .config import BridgeConfig
 from .hook_sink import build_settings, read_events
 from .pty_runner import PtyProcess, child_env
@@ -25,6 +33,12 @@ EXITED = "exited"
 FAILED = "failed"
 
 STATUS_KO = {**tr.STATUS_KO, STARTING: "기동 중", EXITED: "종료됨", FAILED: "기동 실패"}
+
+BRIDGE, BACKGROUND, DESKTOP = "bridge", "background", "desktop"
+KIND_KO = {BRIDGE: "브리지 세션", BACKGROUND: "백그라운드 세션", DESKTOP: "데스크톱 앱·터미널 세션"}
+
+INJECT_GRACE = 2.0      # 주입 직후 이 시간 동안은 실시간 상태가 idle 이어도 작업 중으로 본다
+SETTLE = 2.0            # 끝나지 않은 턴이 idle 이 되면 transcript 가 이만큼 조용해진 뒤에 '중단됨'으로 본다
 
 
 class BridgeError(Exception):
@@ -38,9 +52,24 @@ class BridgeError(Exception):
         return {"ok": False, "error": self.code, "message": self.message, **self.extra}
 
 
+def sanitize_command(text: str) -> str:
+    """음성 경로 명령 정리 (보안).
+    - 제어문자 제거: ESC 시퀀스로 권한 모드 순환(Shift+Tab=\\x1b[Z)·붙여넣기 탈출·조기 제출(\\r)을 막는다
+    - '!' 로 시작하면 거부: Claude Code bash 모드라 권한 확인 없이 셸 명령이 실행된다"""
+    cleaned = "".join(ch for ch in text if ch in "\n\t" or (ord(ch) >= 32 and not 0x7F <= ord(ch) <= 0x9F))
+    cleaned = cleaned.strip()
+    if not cleaned:
+        raise BridgeError("empty", "명령이 비었습니다.")
+    if cleaned.startswith("!"):
+        raise BridgeError("shell_mode_blocked", "'!' 로 시작하는 명령은 권한 확인 없이 셸에서 바로 실행되므로 음성 경로에서는 받지 않습니다. "
+                          "'○○ 명령을 실행해줘' 처럼 말로 요청해 주세요.")
+    return cleaned
+
+
 @dataclass
 class Request:
     id: str
+    session_id: str
     session_name: str
     text: str
     offset: int
@@ -53,9 +82,12 @@ class Session:
     cwd: str
     host: str
     session_id: str
-    proc: PtyProcess
-    events_file: Path
+    proc: PtyProcess | None
+    events_file: Path | None
     config_dir: Path | None
+    kind: str = BRIDGE
+    agent_id: str | None = None          # background: `claude attach` 에 쓰는 짧은 ID
+    live: AgentsCache | None = None
     started_at: float = field(default_factory=time.time)
     ready: bool = False
     failure: str | None = None
@@ -75,39 +107,65 @@ class Session:
         return tr.read_jsonl(self.transcript_path())
 
     def events(self) -> list[dict]:
-        return read_events(self.events_file)
+        return read_events(self.events_file) if self.events_file else []
+
+    def attached(self) -> bool:
+        return self.proc is not None and self.proc.is_alive()
+
+    def live_status(self) -> str | None:
+        return self.live.live_status(self.session_id) if self.live else None
+
+    def permission_mode(self, records: list[dict] | None = None) -> str | None:
+        for r in reversed(records if records is not None else self.records()):
+            if r.get("type") == "permission-mode":
+                return r.get("permissionMode")
+        return None
+
+    def transcript_age(self) -> float:
+        p = self.transcript_path()
+        try:
+            return time.time() - p.stat().st_mtime if p else 1e9
+        except OSError:
+            return 1e9
 
     # ---- 상태 판별 ----
     def quiet(self) -> bool:
-        """TUI 가 조용한가: 스피너가 안 돌고(출력 거의 없음) transcript 도 그대로이며 방금 주입하지 않았음."""
-        now = time.time()
-        if now - self.last_inject < self.quiet_window:
+        """(대체 판정) TUI 가 조용한가: 스피너가 안 돌고 transcript 도 그대로이며 방금 주입하지 않았음."""
+        if self.proc is None:
+            return False
+        if time.time() - self.last_inject < self.quiet_window:
             return False
         if self.proc.output_rate(self.quiet_window) >= self.quiet_rate:
             return False
-        p = self.transcript_path()
-        try:
-            if p is not None and now - p.stat().st_mtime < self.quiet_window:
-                return False
-        except OSError:
-            pass
-        return True
+        return self.transcript_age() >= self.quiet_window
 
     def turn_state(self, turn: tr.Turn, events: list[dict], is_last: bool) -> str:
         st = tr.turn_state(turn, events)
-        # 생각 중 Esc 중단은 transcript 에 흔적이 없다(실측). 마지막 턴이 끝나지 않았는데 TUI 가 조용하면 중단으로 본다.
-        # 단, 결과 없는 tool_use 가 있으면(도구 실행 중이거나 권한 대화상자가 떠 있을 수 있음) 절대 적용하지 않는다.
-        if st == tr.WORKING and is_last and not turn.pending_tool_uses() and self.quiet():
+        if st in (tr.DONE, tr.INTERRUPTED) or not is_last:
+            return st
+        live = self.live_status()
+        if live is not None:
+            if live == tr.AWAITING_APPROVAL:
+                return tr.AWAITING_APPROVAL
+            if live == tr.WORKING or time.time() - self.last_inject < INJECT_GRACE:
+                return tr.WORKING  # 승인 뒤 도구 실행 중도 여기 (훅 기록만으론 계속 승인 대기로 보였음)
+            # 끝나지 않은 턴인데 입력 대기 = 중단 (생각 중 Esc 는 transcript 에 흔적이 없다 — 실측)
+            return tr.INTERRUPTED if self.transcript_age() >= SETTLE else tr.WORKING
+        # 대체 판정 (claude agents 조회 불가): 결과 없는 tool_use 가 있으면 절대 중단으로 보지 않음
+        if st == tr.WORKING and self.kind == BRIDGE and not turn.pending_tool_uses() and self.quiet():
             return tr.INTERRUPTED
         return st
 
     def status(self) -> str:
         if self.failure:
             return FAILED
-        if not self.proc.is_alive():
-            return EXITED
-        if not self.ready:
-            return STARTING
+        if self.kind == BRIDGE:
+            if self.proc is None or not self.proc.is_alive():
+                return EXITED
+            if not self.ready:
+                return STARTING
+        elif self.live is not None and self.live.get() is not None and self.live.by_session(self.session_id) is None:
+            return EXITED  # 백그라운드 세션이 사라짐
         records = self.records()
         if self.inflight is not None:
             if tr.turn_after(records, self.inflight.offset) is None:
@@ -115,30 +173,52 @@ class Session:
             self.inflight = None
         turns = tr.split_turns(records)
         if not turns:
-            return tr.IDLE
+            live = self.live_status()
+            return live if live in (tr.WORKING, tr.AWAITING_APPROVAL) else tr.IDLE
         st = self.turn_state(turns[-1], self.events(), is_last=True)
         return tr.IDLE if st in (tr.DONE, tr.INTERRUPTED) else st
 
+    def blocker(self, records: list[dict] | None = None) -> str | None:
+        """명령을 넣을 수 없는 이유 (없으면 None). 백그라운드 세션은 RC·권한 모드를 확인한다."""
+        if self.kind != BACKGROUND:
+            return None
+        records = records if records is not None else self.records()
+        if not tr.rc_url(records):
+            return "Remote Control 이 켜지지 않은 세션입니다 (claude --bg --remote-control \"이름\" 으로 띄워야 함)."
+        mode = self.permission_mode(records)
+        if mode != "default":
+            return f"권한 모드가 '{mode or '알 수 없음'}' 입니다. 승인 필요(default) 모드 세션에만 음성 명령을 넣습니다."
+        return None
+
     def prompt_box_ready(self) -> bool:
-        """안전장치: 화면 맨 뒤가 입력 대기 안내('? for shortcuts')인지. 권한·확인 대화상자가 떠 있으면 False.
-        대화상자에 명령+Enter 를 넣으면 기본 선택(승인)이 눌릴 수 있으므로 주입 전에 반드시 확인한다."""
+        """안전장치: 화면 맨 뒤가 입력 대기 표시인지. 권한·확인 대화상자가 떠 있으면 False.
+        대화상자에 명령+Enter 를 넣으면 기본 선택(승인)이 눌릴 수 있으므로 주입 전에 반드시 확인한다.
+        대기 표시: 일반 화면 '? for shortcuts', attach 화면 '⏸ manual mode on' (실측)."""
+        if self.proc is None:
+            return False
         scr = "".join(self.proc.screen().split()).lower()
-        idle_at = scr.rfind("forshortcuts")
+        idle_at = max(scr.rfind(k) for k in _IDLE_MARKERS)
         dialog_at = max(scr.rfind(k) for k in _DIALOG_MARKERS)
         return idle_at >= 0 and idle_at > dialog_at
 
     def info(self) -> dict:
         st = self.status()
+        records = self.records()
+        block = self.blocker(records)
         d = {
             "name": self.name,
             "folder": self.cwd,
             "host": self.host,
+            "kind": self.kind,
+            "kind_ko": KIND_KO[self.kind],
             "status": st,
             "status_ko": STATUS_KO.get(st, st),
+            "commandable": block is None and st not in (EXITED, FAILED),
             "session_id": self.session_id,
+            "rc_url": tr.rc_url(records),  # None 이면 RC 미연결 (Code 탭에 안 보임)
         }
-        url = tr.rc_url(self.records())
-        d["rc_url"] = url  # None 이면 RC 미연결 (Code 탭에 안 보임)
+        if block:
+            d["reason"] = block
         if self.failure:
             d["failure"] = self.failure
         if self.warning:
@@ -150,21 +230,30 @@ class SessionManager:
     def __init__(self, config: BridgeConfig):
         self.config = config
         self.config.state_dir.mkdir(parents=True, exist_ok=True)
-        self._sessions: dict[str, Session] = {}
+        self._sessions: dict[str, Session] = {}   # session_id → Session (bridge·background)
         self._requests: dict[str, Request] = {}
-        self._selected: str | None = None
+        self._selected: str | None = None         # session_id
         self._lock = threading.RLock()
+        self.agents = AgentsCache(config.claude_bin, env=self._env())
+
+    def _env(self) -> dict:
+        extra = {}
+        if self.config.claude_config_dir:
+            extra["CLAUDE_CONFIG_DIR"] = str(self.config.claude_config_dir)
+        return child_env(extra)
 
     # ---------- 세션 기동 (P3-4) ----------
     def start_session(self, name: str, cwd: str | None = None, wait: bool = True) -> Session:
-        """RC 세션 기동. cwd 를 주지 않으면 설정의 프리셋에서 찾는다 (MCP 경로는 프리셋만 허용)."""
+        """bridge 세션 기동. cwd 를 주지 않으면 설정의 프리셋에서 찾는다 (MCP 경로는 프리셋만 허용)."""
         name = name.strip()
         if not name:
             raise BridgeError("bad_name", "세션 이름이 비었습니다.")
         with self._lock:
-            old = self._sessions.get(name)
-            if old and old.proc.is_alive() and not old.failure:
+            old = self._bridge_by_name(name)
+            if old and old.proc and old.proc.is_alive() and not old.failure:
                 raise BridgeError("already_running", f"'{name}' 세션이 이미 실행 중입니다.", session=old.info())
+            if old:
+                self._sessions.pop(old.session_id, None)
             if cwd is None:
                 if name not in self.config.sessions:
                     self.config.reload_sessions()  # voice-bridge add 로 방금 추가된 프리셋 반영
@@ -188,14 +277,11 @@ class SessionManager:
                 "--settings", str(settings_file),
                 *self.config.claude_extra_args,
             ]
-            extra_env = {}
-            if self.config.claude_config_dir:
-                extra_env["CLAUDE_CONFIG_DIR"] = str(self.config.claude_config_dir)
-            proc = PtyProcess(argv, cwd=cwd, env=child_env(extra_env))
+            proc = PtyProcess(argv, cwd=cwd, env=self._env())
             s = Session(name=name, cwd=cwd, host=self.config.host_id, session_id=sid, proc=proc,
-                        events_file=events_file, config_dir=self.config.claude_config_dir,
-                        quiet_window=self.config.quiet_window, quiet_rate=self.config.quiet_rate)
-            self._sessions[name] = s
+                        events_file=events_file, config_dir=self.config.claude_config_dir, kind=BRIDGE,
+                        live=self.agents, quiet_window=self.config.quiet_window, quiet_rate=self.config.quiet_rate)
+            self._sessions[sid] = s
         if wait:
             self.wait_ready(s)
         return s
@@ -237,53 +323,175 @@ class SessionManager:
         s.failure = "기동 시간 초과: " + _tail(s.proc.screen())
         raise BridgeError("start_timeout", s.failure)
 
-    def stop_session(self, name: str) -> None:
-        with self._lock:
-            s = self._sessions.pop(name, None)
-            if self._selected == name:
-                self._selected = None
-        if s:
+    # ---------- 백그라운드 세션 ----------
+    def _sync_background(self, agents: list[dict] | None) -> None:
+        """claude agents 의 백그라운드 세션을 등록·갱신하고, 사라진 것은 정리한다."""
+        if agents is None:
+            return
+        seen = set()
+        for a in agents:
+            if a.get("kind") != "background":
+                continue
+            sid = a["sessionId"]
+            seen.add(sid)
+            s = self._sessions.get(sid)
+            if s is None:
+                s = Session(name=a.get("name") or a.get("id") or sid[:8], cwd=a.get("cwd") or "", host=self.config.host_id,
+                            session_id=sid, proc=None, events_file=None, config_dir=self.config.claude_config_dir,
+                            kind=BACKGROUND, agent_id=a.get("id"), live=self.agents, ready=True)
+                self._sessions[sid] = s
+            else:
+                s.name = a.get("name") or s.name
+        for sid, s in list(self._sessions.items()):
+            if s.kind == BACKGROUND and sid not in seen and sid != self._selected:
+                self._detach(s)
+                self._sessions.pop(sid, None)
+
+    def _attach(self, s: Session) -> None:
+        """`claude attach <id>` 를 PTY 로 연다. 이미 붙어 있으면 그대로."""
+        if s.attached():
+            return
+        if not s.agent_id:
+            raise BridgeError("attach_failed", f"'{s.name}' 세션의 attach ID 를 알 수 없습니다.")
+        s.proc = PtyProcess([*self.config.claude_bin, "attach", s.agent_id], cwd=s.cwd or str(Path.home()), env=self._env())
+        end = time.time() + self.config.ready_timeout
+        while time.time() < end:
+            time.sleep(0.3)
+            if not s.proc.is_alive():
+                raise BridgeError("attach_failed", f"'{s.name}' 세션에 붙지 못했습니다: " + _tail(s.proc.screen(), 200))
+            scr = "".join(s.proc.screen().split()).lower()
+            if any(k in scr for k in _IDLE_MARKERS + _DIALOG_MARKERS):
+                return
+        s.proc.terminate()
+        raise BridgeError("attach_failed", f"'{s.name}' 세션에 붙는 데 시간이 너무 걸립니다.")
+
+    @staticmethod
+    def _detach(s: Session) -> None:
+        """attach 만 닫는다. 백그라운드 세션 자체는 계속 돈다."""
+        if s.proc is not None:
             s.proc.terminate()
+            s.proc = None
+
+    # ---------- 정리 ----------
+    def _bridge_by_name(self, name: str) -> Session | None:
+        return next((s for s in self._sessions.values() if s.kind == BRIDGE and s.name == name), None)
+
+    def stop_session(self, name: str) -> None:
+        """bridge 세션은 종료, 백그라운드 세션은 attach 만 해제."""
+        with self._lock:
+            targets = [s for s in self._sessions.values() if s.name == name]
+            for s in targets:
+                if self._selected == s.session_id:
+                    self._selected = None
+                if s.kind == BRIDGE:
+                    self._sessions.pop(s.session_id, None)
+        for s in targets:
+            if s.kind == BRIDGE:
+                if s.proc:
+                    s.proc.terminate()
+            else:
+                self._detach(s)
 
     def shutdown(self) -> None:
-        for name in list(self._sessions):
-            self.stop_session(name)
-
-    # ---------- 목록·고정 (P3-1, P3-2) ----------
-    def list_sessions(self) -> list[dict]:
         with self._lock:
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+            self._selected = None
+        for s in sessions:
+            if s.kind == BRIDGE:
+                if s.proc:
+                    s.proc.terminate()
+            else:
+                self._detach(s)
+
+    # ---------- 목록·고정 (P3-1, P3-2, P3-5) ----------
+    def list_sessions(self) -> list[dict]:
+        """이 머신의 모든 세션: 명령 가능(bridge·백그라운드) + 보기 전용(데스크톱 앱·다른 터미널)."""
+        agents = self.agents.get(fresh=True)
+        with self._lock:
+            self._sync_background(agents)
             out = []
             for s in self._sessions.values():
                 d = s.info()
-                d["selected"] = s.name == self._selected
+                d["selected"] = s.session_id == self._selected
                 out.append(d)
+            ours = set(self._sessions)
+            for a in agents or []:
+                if a.get("kind") == "background" or a["sessionId"] in ours:
+                    continue
+                st = _LIVE_TO_STATUS.get(a.get("status"), tr.IDLE)
+                out.append({
+                    "name": a.get("name") or a["sessionId"][:8],
+                    "folder": a.get("cwd"),
+                    "host": self.config.host_id,
+                    "kind": DESKTOP,
+                    "kind_ko": KIND_KO[DESKTOP],
+                    "status": st,
+                    "status_ko": STATUS_KO.get(st, st),
+                    "commandable": False,
+                    "reason": "데스크톱 앱(또는 다른 터미널)이 입력을 쥐고 있어 음성 명령을 넣을 수 없습니다. "
+                              "Code 탭에서 직접 입력하거나, claude --bg --remote-control 로 띄운 세션을 쓰세요.",
+                    "session_id": a["sessionId"],
+                    "selected": False,
+                })
+            order = {BRIDGE: 0, BACKGROUND: 1, DESKTOP: 2}
+            out.sort(key=lambda d: (order[d["kind"]], d["name"]))
             return out
 
-    def get(self, name: str) -> Session:
-        s = self._sessions.get(name)
-        if s is None:
-            raise BridgeError("no_session", f"'{name}' 세션이 없습니다.", sessions=[x.name for x in self._sessions.values()])
-        return s
+    def _resolve(self, key: str) -> Session:
+        """이름 또는 session_id 로 명령 가능한 세션을 찾는다. 보기 전용이면 이유와 함께 거부."""
+        key = key.strip()
+        agents = self.agents.get()
+        self._sync_background(agents)
+        if key in self._sessions:
+            return self._sessions[key]
+        hits = [s for s in self._sessions.values() if s.name == key]
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            raise BridgeError("ambiguous", f"'{key}' 라는 세션이 여러 개입니다. session_id 로 지정해 주세요.",
+                              candidates=[{"session_id": s.session_id, "kind_ko": KIND_KO[s.kind], "folder": s.cwd}
+                                          for s in hits])
+        for a in agents or []:
+            if (a.get("name") == key or a["sessionId"] == key) and a.get("kind") != "background":
+                raise BridgeError("view_only", f"'{key}' 은 데스크톱 앱(또는 다른 터미널) 세션이라 음성 명령을 넣을 수 없습니다. "
+                                  "Code 탭에서 직접 입력하거나, claude --bg --remote-control 로 띄운 세션을 쓰세요.")
+        raise BridgeError("no_session", f"'{key}' 세션이 없습니다.",
+                          sessions=sorted({s.name for s in self._sessions.values()}))
+
+    def get(self, key: str) -> Session:
+        with self._lock:
+            return self._resolve(key)
 
     def select_session(self, name: str) -> dict:
         with self._lock:
-            s = self.get(name)
-            self._selected = s.name
+            s = self._resolve(name)
+            block = s.blocker()
+            if block:
+                raise BridgeError("not_commandable", f"'{s.name}': {block}", session=s.info())
+            if s.kind == BACKGROUND:
+                self._attach(s)
+            self._selected = s.session_id
             return s.info()
 
     @property
     def selected(self) -> Session:
-        if self._selected is None:
+        if self._selected is None or self._selected not in self._sessions:
+            self._selected = None
             raise BridgeError("no_selection", "고정된 세션이 없습니다. 먼저 list_sessions 로 확인하고 select_session 으로 고정하세요.")
-        return self.get(self._selected)
+        return self._sessions[self._selected]
 
-    # ---------- 명령 주입 (P3-3) ----------
+    # ---------- 명령 주입 (P3-3, P3-6) ----------
     def send_command(self, text: str) -> dict:
-        text = text.strip()
-        if not text:
-            raise BridgeError("empty", "명령이 비었습니다.")
+        text = sanitize_command(text)
         with self._lock:
             s = self.selected
+            records = s.records()
+            block = s.blocker(records)
+            if block:
+                raise BridgeError("not_commandable", f"'{s.name}': {block}", session=s.info())
+            if s.kind == BACKGROUND:
+                self._attach(s)
             st = s.status()
             if st != tr.IDLE:
                 raise BridgeError("busy", f"'{s.name}' 세션이 {STATUS_KO.get(st, st)} 상태라 명령을 넣지 않았습니다.",
@@ -291,12 +499,11 @@ class SessionManager:
             if not s.prompt_box_ready():
                 raise BridgeError("not_at_prompt", f"'{s.name}' 세션 화면에 확인·권한 대화상자가 떠 있어 명령을 넣지 않았습니다. "
                                   "Code 탭에서 확인해 주세요.", session=s.info())
-            records = s.records()
             turns = tr.split_turns(records)
             # 중단된 프롬프트가 입력창에 되돌아와 있을 수 있으니 그 줄 수보다 넉넉히 지운다
             clear_lines = max(8, (turns[-1].prompt.count("\n") + 4) if turns else 0)
-            req = Request(id=uuid.uuid4().hex[:12], session_name=s.name, text=text, offset=len(records),
-                          sent_at=time.time())
+            req = Request(id=uuid.uuid4().hex[:12], session_id=s.session_id, session_name=s.name, text=text,
+                          offset=len(records), sent_at=time.time())
             s.inflight = req
             s.last_inject = req.sent_at
             self._requests[req.id] = req
@@ -308,14 +515,14 @@ class SessionManager:
         req = self._requests.get(request_id)
         if req is None:
             raise BridgeError("no_request", f"요청 ID {request_id} 를 찾을 수 없습니다.")
-        s = self._sessions.get(req.session_name)
+        s = self._sessions.get(req.session_id)
         if s is None:
             raise BridgeError("no_session", f"요청의 세션 '{req.session_name}' 이 없습니다.")
         records = s.records()
         turn = tr.turn_after(records, req.offset)
         base = {"ok": True, "request_id": req.id, "session": s.name}
         if turn is None:
-            if not s.proc.is_alive():
+            if s.kind == BRIDGE and (s.proc is None or not s.proc.is_alive()):
                 raise BridgeError("session_exited", "세션이 종료되어 결과가 없습니다.")
             if time.time() - req.sent_at > self.config.inject_ack_timeout:
                 raise BridgeError("inject_unconfirmed", "명령을 넣었지만 transcript 에 기록되지 않았습니다. Code 탭에서 확인해 주세요.")
@@ -344,11 +551,15 @@ class SessionManager:
             if st not in (tr.WORKING, tr.AWAITING_APPROVAL):
                 return {"ok": True, "session": s.name, "status": st, "status_ko": STATUS_KO.get(st, st),
                         "message": "진행 중인 작업이 없습니다."}
+            if s.kind == BACKGROUND:
+                self._attach(s)
             s.proc.send_escape()
         return {"ok": True, "session": s.name, "message": "중단 신호(Esc)를 보냈습니다."}
 
 
+_IDLE_MARKERS = ("forshortcuts", "manualmodeon")
 _DIALOG_MARKERS = ("doyouwanttoproceed", "doyouwanttomake", "doyouwanttocreate", "entertoconfirm", "esctocancel")
+_LIVE_TO_STATUS = {"idle": tr.IDLE, "busy": tr.WORKING, "waiting": tr.AWAITING_APPROVAL}
 
 _TRUST_MSG = "폴더 신뢰가 필요합니다. 해당 폴더에서 claude 를 한 번 직접 실행해 신뢰해 주세요: {cwd}"
 

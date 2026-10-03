@@ -172,16 +172,15 @@ def test_restored_multiline_prompt_is_cleared(manager):
 
 
 @pytest.mark.req("P3-3")
-def test_static_permission_dialog_is_never_mistaken_for_idle(manager, monkeypatch):
-    """권한 대화상자는 화면이 정적이라 '조용함'이지만, 결과 없는 tool_use 가 있으면 대기로 보지 않는다.
-    (훅 이벤트가 없어도) 여기에 명령+Enter 를 넣으면 승인이 눌릴 수 있다."""
+def test_permission_dialog_without_hooks_is_awaiting_approval(manager, monkeypatch):
+    """훅 이벤트가 없어도(백그라운드 세션처럼) claude agents 의 waiting 으로 승인 대기를 정확히 판정.
+    대화상자에 명령+Enter 가 들어가면 승인이 눌릴 수 있으므로 주입은 거부되어야 한다."""
     monkeypatch.setenv("FAKE_NO_PERM_HOOKS", "1")
     s = manager.start_session("테스트 세션")
     manager.select_session("테스트 세션")
     r = manager.send_command("PERM rm")
-    time.sleep(s.quiet_window + 2)
-    assert s.quiet()  # 화면은 조용하다
-    assert s.status() == tr.WORKING
+    assert wait_until(lambda: s.status() == tr.AWAITING_APPROVAL, timeout=15)
+    assert manager.get_result(r["request_id"])["status"] == tr.AWAITING_APPROVAL
     assert not s.prompt_box_ready()
     with pytest.raises(BridgeError) as e:
         manager.send_command("y")
@@ -189,3 +188,24 @@ def test_static_permission_dialog_is_never_mistaken_for_idle(manager, monkeypatc
     s.proc.write("y")  # 사람이 승인
     assert wait_until(lambda: _done(manager, r["request_id"]))["response"] == "APPROVED"
     assert s.prompt_box_ready()
+
+
+@pytest.mark.req("P3-3")
+def test_fallback_without_agents_never_mistakes_dialog_for_idle(manager, monkeypatch):
+    """claude agents 조회가 안 될 때의 대체 판정: 화면이 조용해도 결과 없는 tool_use 가 있으면 대기로 보지 않는다."""
+    monkeypatch.setenv("FAKE_NO_PERM_HOOKS", "1")
+    manager.agents.env = {**manager.agents.env, "FAKE_AGENTS_FAIL": "1"}
+    manager.agents._at = 0
+    s = manager.start_session("테스트 세션")
+    manager.select_session("테스트 세션")
+    r = manager.send_command("PERM rm")
+    time.sleep(s.quiet_window + 2)
+    assert manager.agents.get(fresh=True) is None
+    assert s.quiet()  # 화면은 조용하다
+    assert s.status() == tr.WORKING
+    assert not s.prompt_box_ready()
+    with pytest.raises(BridgeError) as e:
+        manager.send_command("y")
+    assert e.value.code == "busy"
+    s.proc.write("y")
+    assert wait_until(lambda: _done(manager, r["request_id"]))["response"] == "APPROVED"
