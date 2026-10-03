@@ -5,6 +5,7 @@
     voice-bridge token set-notion             노션 통합 토큰을 보안 저장소에 저장 (표준입력으로 받음)
     voice-bridge info                         설정·호스트 정보
     voice-bridge url                          커넥터 주소 출력 (현재 터널 주소 + 키체인 토큰)
+    voice-bridge add "이름" 폴더 [--start] [--autostart]   세션 프리셋 추가 (재시작 불필요)
     voice-bridge tunnel                       cloudflared 임시 터널 (주소가 바뀌면 맥 알림)
     voice-bridge service install|uninstall|status   로그인 시 자동 실행 (macOS launchd)
 """
@@ -162,6 +163,48 @@ def cmd_service(args, cfg: BridgeConfig) -> int:
     return 0
 
 
+def cmd_add(args, cfg: BridgeConfig) -> int:
+    from pathlib import Path
+
+    from .config import add_preset, claude_trusts
+
+    folder = Path(args.folder).expanduser().resolve()
+    if not folder.is_dir():
+        print(f"폴더가 없습니다: {folder}", file=sys.stderr)
+        return 1
+    add_preset(cfg.source or default_config_path(), args.name, str(folder), autostart=args.autostart)
+    print(f"추가: \"{args.name}\" = {folder}" + ("  (자동 기동)" if args.autostart else ""))
+    trusted = claude_trusts(str(folder))
+    if trusted is False:
+        print(f"주의: claude 가 아직 이 폴더를 신뢰하지 않았습니다. 한 번 실행해 '신뢰'를 고르세요:\n  cd {folder} && claude")
+    if args.start:
+        if trusted is False:
+            print("폴더 신뢰 전이라 지금은 띄우지 않았습니다.")
+            return 0
+        import asyncio
+        import json
+
+        from mcp import Client
+
+        from .auth import MCP_TOKEN, load_secret
+
+        async def go():
+            async with Client(f"http://127.0.0.1:{cfg.port}/t/{load_secret(MCP_TOKEN)}/mcp") as c:
+                return json.loads((await c.call_tool("start_session", {"name": args.name})).content[0].text)
+
+        try:
+            r = asyncio.run(go())
+        except Exception as e:
+            print(f"실행 중인 브리지에 연결하지 못했습니다 ({type(e).__name__}). 휴대폰에서 '{args.name} 세션 띄워줘' 로 띄우세요.")
+            return 0
+        if r.get("ok"):
+            print(f"세션 기동: {args.name} (상태 {r['session']['status_ko']})")
+        else:
+            print(f"기동 실패: {r.get('message')}")
+    print(f"휴대폰에서: \"{args.name} 세션 띄워줘\" → \"{args.name} 세션으로 하자\"")
+    return 0
+
+
 def cmd_info(args, cfg: BridgeConfig) -> int:
     print(f"config    : {default_config_path()}")
     print(f"host_id   : {cfg.host_id}")
@@ -181,12 +224,17 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("action", choices=["init", "set-notion"])
     sub.add_parser("info")
     sub.add_parser("url", help="커넥터 주소(토큰 포함) 출력")
+    ad = sub.add_parser("add", help="세션 프리셋 추가 (브리지 재시작 불필요)")
+    ad.add_argument("name", help="음성으로 부를 세션 이름")
+    ad.add_argument("folder", help="작업 폴더")
+    ad.add_argument("--autostart", action="store_true", help="브리지가 뜰 때 자동 기동")
+    ad.add_argument("--start", action="store_true", help="실행 중인 브리지에 지금 바로 기동")
     sub.add_parser("tunnel", help="cloudflared 임시 터널 실행 (주소 바뀌면 맥 알림)")
     sv = sub.add_parser("service", help="자동 실행 (launchd) 등록·해제·상태")
     sv.add_argument("action", choices=["install", "uninstall", "status"])
     args = p.parse_args(argv)
     cfg = BridgeConfig.load()
-    return {"serve": cmd_serve, "token": cmd_token, "info": cmd_info, "url": cmd_url,
+    return {"serve": cmd_serve, "token": cmd_token, "info": cmd_info, "url": cmd_url, "add": cmd_add,
             "tunnel": cmd_tunnel, "service": cmd_service}[args.cmd](args, cfg)
 
 

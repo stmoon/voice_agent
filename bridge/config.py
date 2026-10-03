@@ -48,6 +48,7 @@ class BridgeConfig:
     quiet_rate: float = 150.0     # 출력 문자/초. 실측: 작업 중 500~1100, 대기 0~50
     allowed_hosts: list[str] = field(default_factory=list)  # 터널 도메인 (Host 헤더)
     python: str = sys.executable
+    source: Path | None = None    # 읽어 온 설정 파일 (프리셋 다시 읽기용)
 
     def __post_init__(self) -> None:
         self.state_dir = Path(self.state_dir).expanduser()
@@ -69,5 +70,81 @@ class BridgeConfig:
             data = tomllib.loads(path.read_text(encoding="utf-8"))
         if isinstance(data.get("claude_bin"), str):
             data["claude_bin"] = shlex.split(data["claude_bin"])
-        known = {f for f in cls.__dataclass_fields__}
-        return cls(**{k: v for k, v in data.items() if k in known})
+        known = {f for f in cls.__dataclass_fields__} - {"source"}
+        cfg = cls(**{k: v for k, v in data.items() if k in known})
+        cfg.source = path
+        return cfg
+
+    def reload_sessions(self) -> None:
+        """설정 파일의 [sessions] 를 다시 읽는다 (브리지 재시작 없이 새 프리셋 반영)."""
+        if self.source is None or not self.source.exists():
+            return
+        data = tomllib.loads(self.source.read_text(encoding="utf-8"))
+        self.sessions = {k: str(Path(v).expanduser()) for k, v in (data.get("sessions") or {}).items()}
+
+
+def _toml_str(v: str) -> str:
+    return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def add_preset(path: Path, name: str, folder: str, autostart: bool = False) -> None:
+    """설정 파일에 프리셋 한 줄을 추가한다(주석·순서 보존). 같은 이름이 있으면 폴더를 바꾼다."""
+    name = name.strip()
+    if not name:
+        raise ValueError("세션 이름이 비었습니다.")
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    data = tomllib.loads(text) if text else {}
+    line = f"{_toml_str(name)} = {_toml_str(folder)}"
+    lines = text.splitlines()
+    sess_at = next((i for i, l in enumerate(lines) if l.strip() == "[sessions]"), None)
+    if sess_at is None:
+        lines += ["", "[sessions]", line]
+    else:
+        end = next((i for i in range(sess_at + 1, len(lines)) if lines[i].strip().startswith("[")), len(lines))
+        existing = None
+        for i in range(sess_at + 1, end):
+            st = lines[i].strip()
+            if st and not st.startswith("#") and "=" in st:
+                try:
+                    if name in tomllib.loads("[s]\n" + st).get("s", {}):
+                        existing = i
+                except tomllib.TOMLDecodeError:
+                    pass
+        if existing is not None:
+            lines[existing] = line
+        else:
+            ins = end
+            while ins > sess_at + 1 and not lines[ins - 1].strip():
+                ins -= 1
+            lines.insert(ins, line)
+    if autostart:
+        auto = list(data.get("autostart") or [])
+        if name not in auto:
+            auto.append(name)
+        new = "autostart = [" + ", ".join(_toml_str(a) for a in auto) + "]"
+        at = next((i for i, l in enumerate(lines) if l.strip().startswith("autostart")), None)
+        if at is not None:
+            lines[at] = new
+        else:
+            top = next((i for i, l in enumerate(lines) if l.strip().startswith("[")), len(lines))
+            lines.insert(top, new)
+    out = "\n".join(lines) + "\n"
+    tomllib.loads(out)  # 깨진 TOML 은 쓰지 않는다
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(out, encoding="utf-8")
+
+
+def claude_trusts(folder: str) -> bool | None:
+    """claude 가 이 폴더(또는 상위 폴더)를 신뢰했는지 ~/.claude.json 으로 확인. 알 수 없으면 None."""
+    import json
+
+    cfg = Path.home() / ".claude.json"
+    try:
+        projects = json.loads(cfg.read_text(encoding="utf-8")).get("projects", {})
+    except Exception:
+        return None
+    p = Path(folder).expanduser().resolve()
+    for cand in (p, *p.parents):
+        if projects.get(str(cand), {}).get("hasTrustDialogAccepted"):
+            return True
+    return False

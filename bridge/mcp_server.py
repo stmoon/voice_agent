@@ -72,9 +72,10 @@ def build_mcp(manager: SessionManager) -> MCPServer:
     @mcp.tool()
     async def start_session(name: str) -> dict:
         """설정에 등록된 프리셋 이름으로 RC 세션을 띄운다 (임의 폴더 불가). 목록은 list_sessions 의 presets."""
-        def run():
+        def start_session_():
             return manager.start_session(name).info()
-        r = await call(run)
+        start_session_.__name__ = "start_session"
+        r = await call(start_session_)
         return r if r.get("ok") is False else {"ok": True, "session": r}
 
     return mcp

@@ -167,6 +167,8 @@ class SessionManager:
                 raise BridgeError("already_running", f"'{name}' 세션이 이미 실행 중입니다.", session=old.info())
             if cwd is None:
                 if name not in self.config.sessions:
+                    self.config.reload_sessions()  # voice-bridge add 로 방금 추가된 프리셋 반영
+                if name not in self.config.sessions:
                     raise BridgeError("unknown_preset", f"'{name}' 은 등록된 세션 프리셋이 아닙니다.",
                                       presets=sorted(self.config.sessions))
                 cwd = self.config.sessions[name]
