@@ -398,5 +398,6 @@ def run_tunnel(port: int, state_dir: Path, popen=subprocess.Popen, run=subproces
             out.write(f"[tunnel] 주소: https://{host}\n")
             if host != prev:
                 notify("음성 브리지 주소가 바뀌었습니다",
-                       f"{host} — 터미널에서 voice-bridge url 로 새 주소를 확인해 커넥터를 갱신하세요.", run=run)  # noqa
+                       f"{host} — 터미널에서 voice-bridge url 로 새 주소를 확인해 커넥터를 갱신하세요.",
+                       run=run, popen=popen)  # noqa
     return p.wait()

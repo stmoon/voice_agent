@@ -51,11 +51,28 @@ def test_install_writes_plists_and_bootstraps(tmp_path, monkeypatch):
 
 
 class FakePopen:
+    """subprocess.Popen 대역. 프로세스 핸들(_handle)이 없다 → Windows Job Object 등록은 건너뛰어야 한다."""
+
     def __init__(self, lines):
         self.stdout = iter(lines)
 
     def wait(self):
         return 0
+
+
+class FakePopenFactory:
+    """cloudflared 는 LINES 를 출력하고, 그 밖의 실행(Windows 트레이 알림 powershell)은 기록만 한다."""
+
+    def __init__(self, lines):
+        self.lines = lines
+        self.calls = []
+
+    def __call__(self, args, **kw):
+        self.calls.append(args)
+        return FakePopen(self.lines if args[0] == "cloudflared" else [])
+
+    def notes(self):
+        return [c for c in self.calls if c[0] == "powershell"]
 
 
 LINES = [
@@ -66,16 +83,25 @@ LINES = [
 ]
 
 
-def test_tunnel_records_host_and_notifies_on_change(tmp_path):
-    run = FakeRun()
-    out = io.StringIO()
-    service.run_tunnel(8765, tmp_path, popen=lambda *a, **k: FakePopen(LINES), run=run, out=out)
-    assert service.host_file(tmp_path).read_text().strip() == "fusion-topics-such-rotary.trycloudflare.com"
-    notes = [c for c in run.calls if c[0] == "osascript"]
+def _notes(run, popen):
+    """플랫폼별 알림 호출: macOS osascript(run), Windows powershell(popen), Linux notify-send(run)."""
     if sys.platform == "darwin":
-        assert len(notes) == 1 and "fusion-topics-such-rotary" in notes[0][2]
-        assert "/t/" not in notes[0][2]  # 알림에 토큰 없음
+        return [c for c in run.calls if c[0] == "osascript"]
+    if sys.platform == "win32":
+        return popen.notes()
+    return [c for c in run.calls if c[0] == "notify-send"]
+
+
+def test_tunnel_records_host_and_notifies_on_change(tmp_path):
+    run, popen = FakeRun(), FakePopenFactory(LINES)
+    out = io.StringIO()
+    service.run_tunnel(8765, tmp_path, popen=popen, run=run, out=out)
+    assert service.host_file(tmp_path).read_text().strip() == "fusion-topics-such-rotary.trycloudflare.com"
+    notes = _notes(run, popen)
+    if sys.platform in ("darwin", "win32"):
+        assert len(notes) == 1 and "fusion-topics-such-rotary" in notes[0][-1]
+        assert "/t/" not in notes[0][-1]  # 알림에 토큰 없음
     # 같은 주소로 다시 뜨면 알림 없음
-    run2 = FakeRun()
-    service.run_tunnel(8765, tmp_path, popen=lambda *a, **k: FakePopen(LINES), run=run2, out=io.StringIO())
-    assert not [c for c in run2.calls if c[0] == "osascript"]
+    run2, popen2 = FakeRun(), FakePopenFactory(LINES)
+    service.run_tunnel(8765, tmp_path, popen=popen2, run=run2, out=io.StringIO())
+    assert not _notes(run2, popen2)

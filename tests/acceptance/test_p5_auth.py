@@ -51,6 +51,57 @@ def test_valid_token_passes(server, path, headers):
 
 
 @pytest.mark.req("P5-1")
+@pytest.mark.parametrize("path,headers", [
+    ("/mcp", []),
+    ("/t/wrong/mcp", []),
+    ("/mcp", [(b"authorization", b"Bearer wrong")]),
+])
+async def test_unauthenticated_body_is_never_read(path, headers):
+    """토큰이 틀린 요청은 본문을 읽지 않고 401 (먼저 읽으면 토큰 없는 큰 요청이 메모리에 올라온다)."""
+    reads, sent = [], []
+
+    async def receive():
+        reads.append(1)
+        return {"type": "http.request", "body": b"x" * 1024, "more_body": True}
+
+    async def send(msg):
+        sent.append(msg)
+
+    async def app(scope, receive, send):  # 인증을 통과하면 안 된다
+        raise AssertionError("app reached")
+
+    mw = auth.TokenAuthMiddleware(app, "right-token")
+    scope = {"type": "http", "method": "POST", "path": path, "headers": [(b"host", b"127.0.0.1:8765"), *headers]}
+    await mw(scope, receive, send)
+    assert sent[0]["status"] == 401 and not reads
+
+
+@pytest.mark.req("P5-1")
+async def test_authenticated_body_reaches_app_intact():
+    """인증 통과 후 진단 로그를 위해 본문을 읽어도 앱은 본문을 그대로 받는다."""
+    chunks = [{"type": "http.request", "body": b'{"jsonrpc": "2.0", ', "more_body": True},
+              {"type": "http.request", "body": b'"id": 1, "method": "ping"}', "more_body": False}]
+
+    async def receive():
+        return chunks.pop(0)
+
+    got = []
+
+    async def app(scope, receive, send):
+        while True:
+            m = await receive()
+            got.append(m.get("body", b""))
+            if not m.get("more_body"):
+                break
+        got.append(scope["path"])
+
+    mw = auth.TokenAuthMiddleware(app, "right-token")
+    scope = {"type": "http", "method": "POST", "path": "/t/right-token/mcp", "headers": [(b"host", b"localhost")]}
+    await mw(scope, receive, None)
+    assert b"".join(got[:-1]) == b'{"jsonrpc": "2.0", "id": 1, "method": "ping"}' and got[-1] == "/mcp"
+
+
+@pytest.mark.req("P5-1")
 def test_healthz_reveals_nothing(server):
     r = httpx.get(server + "/healthz")
     assert r.status_code == 200 and r.json() == {"ok": True}

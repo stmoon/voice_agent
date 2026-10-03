@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 import uuid
@@ -24,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import transcript as tr
-from .agents import AgentsCache
+from .agents import AgentsCache, not_found_message
 from .config import BridgeConfig
 from .hook_sink import build_settings, read_events
 from .pty_runner import PtyProcess, child_env
@@ -40,6 +41,7 @@ KIND_KO = {BRIDGE: "브리지 세션", BACKGROUND: "백그라운드 세션", DES
 
 INJECT_GRACE = 2.0      # 주입 직후 이 시간 동안은 실시간 상태가 idle 이어도 작업 중으로 본다
 SETTLE = 2.0            # 끝나지 않은 턴이 idle 이 되면 transcript 가 이만큼 조용해진 뒤에 '중단됨'으로 본다
+MAX_REQUESTS = 200      # 결과를 조회할 수 있게 기억해 두는 최근 요청 수
 
 
 class BridgeError(Exception):
@@ -113,6 +115,7 @@ class Session:
     failure: str | None = None
     warning: str | None = None
     _transcript: Path | None = None
+    _reader: tr.JsonlReader = field(default_factory=tr.JsonlReader, repr=False)  # transcript 이어 읽기
     inflight: Request | None = None  # 주입했지만 아직 transcript 에 프롬프트가 안 보인 요청
     last_inject: float = 0.0
     inflight_timeout: float = 20.0
@@ -125,7 +128,7 @@ class Session:
         return self._transcript
 
     def records(self) -> list[dict]:
-        return tr.read_jsonl(self.transcript_path())
+        return self._reader.read(self.transcript_path())
 
     def events(self) -> list[dict]:
         return read_events(self.events_file) if self.events_file else []
@@ -303,6 +306,13 @@ class SessionManager:
             extra["CLAUDE_CONFIG_DIR"] = str(self.config.claude_config_dir)
         return child_env(extra)
 
+    def _check_claude(self) -> None:
+        """claude 실행 파일이 없으면 바로 알아듣기 쉬운 오류로 (PTY 기동 실패·즉시 종료처럼 보이지 않게)."""
+        exe = self.config.claude_bin[0]
+        if shutil.which(exe, path=self._env().get("PATH")) or Path(exe).is_file():
+            return
+        raise BridgeError("claude_not_found", not_found_message(self.config.claude_bin))
+
     # ---------- 세션 기동 (P3-4) ----------
     def start_session(self, name: str, cwd: str | None = None, wait: bool = True) -> Session:
         """bridge 세션 기동. cwd 를 주지 않으면 설정의 프리셋에서 찾는다 (MCP 경로는 프리셋만 허용)."""
@@ -325,6 +335,7 @@ class SessionManager:
             cwd = str(Path(cwd).expanduser().resolve())
             if not Path(cwd).is_dir():
                 raise BridgeError("no_folder", f"폴더가 없습니다: {cwd}")
+            self._check_claude()
 
             sid = str(uuid.uuid4())
             events_file = self.config.state_dir / f"{sid}.events.jsonl"
@@ -429,6 +440,7 @@ class SessionManager:
             raise BridgeError("session_exited", f"'{s.name}' 세션이 실행 중이 아닙니다 (멈췄거나 종료됨).")
         if s.proc is not None:
             s.proc.terminate()  # 스스로 끝난 이전 attach 정리
+        self._check_claude()
         try:
             s.proc = PtyProcess([*self.config.claude_bin, "attach", s.agent_id], cwd=s.cwd or str(Path.home()),
                                 env=self._env())
@@ -501,7 +513,7 @@ class SessionManager:
                 if a.get("kind") == "background" or a["sessionId"] in ours:
                     continue
                 st = _LIVE_TO_STATUS.get(a.get("status"), tr.IDLE)
-                url = tr.rc_url(tr.read_jsonl(tr.find_transcript(a["sessionId"], self.config.claude_config_dir)))
+                url = tr.rc_url_in_file(tr.find_transcript(a["sessionId"], self.config.claude_config_dir))
                 reason = ("데스크톱 앱(또는 다른 터미널)이 입력을 쥐고 있어 음성 명령을 넣을 수 없습니다. "
                           + ("휴대폰 Code 탭에서 직접 입력하세요." if url else "Remote Control 도 꺼져 있어 휴대폰에서는 볼 수 없습니다.")
                           + f" 음성으로 쓸 세션은 이렇게 띄우세요: {launch_hint(self.config.allowed_permission_modes)}")
@@ -606,6 +618,8 @@ class SessionManager:
                 s.inflight = None
                 raise BridgeError("inject_failed", f"'{s.name}' 세션에 입력하지 못했습니다 ({e.__class__.__name__}).")
             self._requests[req.id] = req
+            while len(self._requests) > MAX_REQUESTS:  # 오래 켜 두어도 요청 기록이 끝없이 쌓이지 않게 (오래된 것부터)
+                self._requests.pop(next(iter(self._requests)))
         started = {"ok": True, "request_id": req.id, "session": s.name, "status": tr.WORKING,
                    "status_ko": STATUS_KO[tr.WORKING]}
         if not wait:

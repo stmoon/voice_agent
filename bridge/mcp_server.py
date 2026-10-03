@@ -42,7 +42,7 @@ INSTRUCTIONS = """\
 - bridge: bridge 가 띄운 세션 — 명령 가능
 - background: 사용자가 claude --bg -n "이름" --remote-control "이름" 으로 띄운 세션 — 명령 가능 (권한 모드가 허용 목록일 때)
 - desktop: 데스크톱 앱·다른 터미널 세션 — 보기 전용. 명령을 넣을 수 없으니 reason 대로 안내
-목록을 읽어 줄 때는 명령 불가 세션도 이름과 reason 을 함께 짧게 알린다.
+목록을 읽어 줄 때는 명령 불가 세션도 이름과 reason 을 함께 짧게 알린다. warning 이 있으면 그것부터 알린다.
 
 규칙:
 1. 세션 지정은 사용자가 명시적으로 한다. 추론해서 고르지 말 것.
@@ -87,8 +87,12 @@ def build_mcp(manager: SessionManager) -> MCPServer:
     async def list_sessions() -> dict:
         """이 머신의 모든 Claude Code 세션 (이름, 작업 폴더, 호스트명, 상태: 대기/작업 중/승인 대기, 종류, 명령 가능 여부)."""
         sessions = await call(manager.list_sessions)
-        return {"ok": True, "host": manager.config.host_id, "sessions": sessions,
-                "presets": sorted(manager.config.sessions), "bridge_version": BRIDGE_VERSION}
+        d = {"ok": True, "host": manager.config.host_id, "sessions": sessions,
+             "presets": sorted(manager.config.sessions), "bridge_version": BRIDGE_VERSION}
+        if manager.agents.error:
+            # claude 가 없거나 오래돼 목록 조회 실패 → 빈 목록만 주면 "세션이 없다"로 오해한다
+            d["warning"] = f"이 머신의 세션 목록을 읽지 못했습니다: {manager.agents.error}"
+        return d
 
     @mcp.tool()
     async def select_session(name: str) -> dict:

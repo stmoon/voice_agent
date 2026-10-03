@@ -4,10 +4,15 @@
 
 | 항목 | macOS | Windows | Linux |
 |---|---|---|---|
-| Claude Code (로그인까지) | `claude /login` | 같음 + Git for Windows | 같음 |
+| Claude Code **2.1.285 이상** (로그인까지) | `claude /login` | 같음 + Git for Windows | 같음 |
 | Python 3.11 이상 | `brew install python@3.12` | `winget install Python.Python.3.12` | 배포판 패키지 |
 | cloudflared | 설치 스크립트가 brew 로 설치 | 설치 스크립트가 winget 으로 설치 | https://pkg.cloudflare.com |
 | claude.ai 계정 | 사용자 지정 커넥터를 추가할 수 있는 계정 | | |
+
+- `claude` 가 PATH 에 있어야 한다. 오래된 CLI(`agents --json`·`--bg`·`attach` 없음)는 `claude update` 로 올린다.
+  `voice-bridge info` 가 찾은 claude 의 경로·버전과 문제를 알려 준다.
+- Windows 공식 설치본은 `%USERPROFILE%\.local\bin\claude.exe` 에 깔린다. 그 폴더가 PATH 에 없으면 브리지가 claude 를
+  찾지 못한다(세션 목록이 비고 `warning` 이 붙음) → PATH 에 넣거나 설정의 `claude_bin` 에 전체 경로를 적는다.
 
 ## 한 번에 설치
 
@@ -66,6 +71,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 | `session_permission_mode` | `"default"` | 브리지가 직접 띄우는 세션의 모드 |
 | `wait_timeout` | 50 | 결과를 한 번에 기다리는 최대 초 (Cloudflare 100초 제한보다 짧게) |
 | `autostart` | `[]` | 브리지가 뜰 때 함께 띄울 프리셋 이름 |
+| `claude_bin` | `"claude"` | claude 실행 파일 (PATH 에 없으면 전체 경로) |
 | `[sessions]` | — | 프리셋: `"이름" = "폴더"` (`voice-bridge add` 로 추가) |
 
 ## 자동 실행
@@ -108,10 +114,11 @@ rm -rf ~/.local/share/voice-bridge ~/.local/bin/voice-bridge ~/.config/voice-bri
 | 세션이 목록에 있는데 명령 불가 | `voice-bridge session list` 의 이유: RC 꺼짐(다시 만들기), 허용되지 않는 권한 모드 |
 | 아무 응답이 없음 | `voice-bridge service status`, 로그 폴더, 알림(주소가 바뀌었는지) |
 | 세션이 "기동 실패" (폴더 신뢰) | 그 폴더에서 `claude` 를 한 번 실행해 신뢰 |
+| 목록이 비고 "세션 목록을 읽지 못했습니다" | `voice-bridge info` 로 claude 경로·버전 확인 (PATH, 2.1.285 이상) |
 
 ## 개발
 
 - 구성·설계 결정·실측 기록: [docs/DESIGN.md](docs/DESIGN.md)
 - 테스트: `make test` (가짜 claude), `make verify-live` (실제 claude, 로그인 필요). CI 는 macOS·Windows·Linux
-- Windows 에서 테스트를 직접 돌릴 때는 `set PYTHONUTF8=1` 후 `python -m pytest -q`
+- Windows 에서 테스트를 직접 돌릴 때는 `set PYTHONUTF8=1` 후 `python -m pytest -q` (한국어 Windows 에서도 통과)
 - 요구사항·진행 현황 기준 문서: 노션 「🔌 음성 대화 - Claude Code 연동 (MCP 브리지)」

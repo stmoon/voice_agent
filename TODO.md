@@ -4,11 +4,15 @@
 
 ## 확인 필요 (실기)
 
-- [ ] **Windows PC 에서 실제 사용** — 다른 작업에서 진행 중 (2026-10-04~). CI 는 실패 1건 수정 후 재확인 필요
+- [ ] **Windows PC 에서 실제 사용** — 진행 중 (2026-10-04, Windows 11 한국어, claude 2.1.286).
+      CI Windows 실패 1건(터널 테스트의 가짜 Popen `_handle`)은 수정 → push 후 CI 재확인
   - [ ] `scripts\install.ps1` 로 설치 → 작업 스케줄러 등록이 일반 권한으로 되는지, 창 없이 뜨는지, 꺼지면 1분 안에 다시 뜨는지
-  - [ ] `claude --bg` / `claude attach` / `claude agents --json` 이 Windows 에서도 macOS 와 같이 동작하는지
-  - [ ] ConPTY 를 거친 Esc(중단)·Ctrl+U(입력창 비우기)·Enter 가 Claude Code 에 의도대로 들어가는지
-  - [ ] 한글 폴더·세션 이름, npm 설치본(`claude.cmd`)과 공식 설치본(`claude.exe`) 둘 다
+  - [x] `claude --bg` / `claude attach` / `claude agents --json` — 한글 이름·경로, 브리지의 attach 약 4초, 화면 하단 모드 판정,
+        attach 를 닫아도 세션 유지, `stop`·`rm` 확인 (Remote Control 연결은 아래 휴대폰 흐름에서)
+  - [ ] ConPTY 를 거친 Esc(중단)·Ctrl+U(입력창 비우기)·Enter — Ctrl+U/Backspace 지우기(한 줄·여러 줄·화면 폭을 넘는 줄),
+        한글 입력, 여러 줄 붙여넣기(중간 제출 없음) 확인. Esc 중단은 남음
+  - [ ] 한글 폴더·세션 이름, npm 설치본(`claude.cmd`)과 공식 설치본(`claude.exe`) 둘 다 — 한글 이름·폴더, `claude.exe` 확인.
+        `claude.cmd` 는 남음
   - [ ] 휴대폰에서 세션 목록 → 명령 → 결과 → 승인 흐름
 - [ ] **auto 모드 세션**(`위키자동`)을 휴대폰에서 명령 → 승인 없이 결과가 오는지
 - [ ] **브라우저 세션**(`--chrome`)을 휴대폰에서 명령 → 크롬 조작·요약이 되는지, 확인 규칙(구매·전송 전 "진행할까요?")이 지켜지는지
@@ -31,7 +35,8 @@
 - [ ] 책상에서 `claude attach` 로 같은 세션에 붙어 입력 중일 때 음성 명령이 오면 입력창 비우기가 그 내용을 지울 수 있음
       → 입력 줄이 비어 있지 않으면 거부
 - [ ] 가짜 claude 의 attach 를 실제처럼 "세션 본체 + 붙는 클라이언트" 로 분리 (승인 뒤 백그라운드 진행 등 재현력)
-- [ ] Windows: ConPTY 출력량으로 `quiet_rate` 재측정(지금 값은 macOS 실측), Shift+Tab 모드 전환 테스트 재현
+- [ ] Windows: ConPTY 출력량으로 `quiet_rate` 재측정(지금 값은 macOS 실측). (Shift+Tab 모드 전환 테스트는 가짜 claude 가
+      ReadConsoleInputW 로 키를 읽게 바꿔 Windows 에서도 돈다)
 - [ ] `plan` 권한 모드 지원 여부 (승인창 문구 실측 필요)
 - [ ] RC 끊김 기록 문구(`Remote Control disconnected …`) 외 다른 끊김 형태가 있는지 확인
 - [ ] 노션 본문의 도구 표가 5개로 되어 있음 (실제 7개: + `start_session`, `get_result(wait)`) — 갱신 여부 결정

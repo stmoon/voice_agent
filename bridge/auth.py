@@ -152,22 +152,24 @@ class TokenAuthMiddleware:
         if not origin_allowed(headers.get(b"origin"), self.allowed_hosts):
             return await _respond(send, 403, {"error": "invalid origin"})
         expected = self.token()
-        receive = await _peek_rpc(scope, receive)
         if path.startswith("/t/"):
             _, _, rest = path.partition("/t/")
             given, sep, tail = rest.partition("/")
-            if given and _eq(given, expected):
-                scope = dict(scope)
-                scope["path"] = "/" + tail if sep else "/"
-                scope["raw_path"] = scope["path"].encode()
-                return await self.app(scope, receive, send)
-            _diag("경로 토큰 불일치", given, expected, headers)
-            return await _respond(send, 401, {"error": "unauthorized"})
-        val = headers.get(b"authorization", "")
-        if val.lower().startswith("bearer ") and _eq(val[7:].strip(), expected):
-            return await self.app(scope, receive, send)
-        _diag("토큰 없음/헤더 불일치", val[7:].strip() if val.lower().startswith("bearer ") else None, expected, headers)
-        return await _respond(send, 401, {"error": "unauthorized"})
+            if not (given and _eq(given, expected)):
+                _diag("경로 토큰 불일치", given, expected, headers)
+                return await _respond(send, 401, {"error": "unauthorized"})
+            scope = dict(scope)
+            scope["path"] = "/" + tail if sep else "/"
+            scope["raw_path"] = scope["path"].encode()
+        else:
+            val = headers.get(b"authorization", "")
+            if not (val.lower().startswith("bearer ") and _eq(val[7:].strip(), expected)):
+                _diag("토큰 없음/헤더 불일치", val[7:].strip() if val.lower().startswith("bearer ") else None,
+                      expected, headers)
+                return await _respond(send, 401, {"error": "unauthorized"})
+        # 본문은 인증을 통과한 요청만 들여다본다 (먼저 읽으면 토큰 없는 큰 요청이 그대로 메모리에 올라온다)
+        receive = await _peek_rpc(scope, receive)
+        return await self.app(scope, receive, send)
 
 
 async def _peek_rpc(scope, receive):

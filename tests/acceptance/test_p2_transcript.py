@@ -47,6 +47,45 @@ def test_partial_last_line_is_ignored(tmp_path):
     assert tr.read_jsonl(f) == [{"type": "mode"}]
 
 
+@pytest.mark.req("P2-1")
+def test_incremental_reader_matches_full_read(tmp_path):
+    """이어 읽기: 새로 완결된 줄만 파싱하되 결과는 매번 처음부터 읽은 것과 같아야 한다."""
+    f = tmp_path / "t.jsonl"
+    r = tr.JsonlReader()
+    assert r.read(None) == [] and r.read(tmp_path / "none.jsonl") == []
+    f.write_bytes(b"")
+    assert r.read(f) == []
+    with open(f, "ab") as w:
+        w.write(json.dumps({"n": 1}).encode() + b"\n" + '{"n": 2, "t": "한'.encode())  # 기록 중인 줄 (한글 중간에서 끊김)
+    assert r.read(f) == [{"n": 1}] == tr.read_jsonl(f)
+    with open(f, "ab") as w:
+        w.write('글"}\n'.encode() + b"not json\n\n" + json.dumps({"n": 3}).encode() + b"\r\n"
+                + b'{"bad": "\xff"}\n')
+    got = r.read(f)
+    assert got == [{"n": 1}, {"n": 2, "t": "한글"}, {"n": 3}, {"bad": "�"}] == tr.read_jsonl(f)
+    got.append({"x": 1})                      # 돌려받은 목록을 바꿔도 다음 결과에 영향 없음
+    assert r.read(f) == tr.read_jsonl(f)
+    f.write_text(json.dumps({"n": 9}) + "\n")  # 줄어듦(교체·잘림) → 처음부터
+    assert r.read(f) == [{"n": 9}]
+    for name in ("fake_approved", "real_2.1.285_pong_done", "real_2.1.285_interrupt_while_streaming"):
+        assert tr.JsonlReader().read(FIXTURES / f"{name}.jsonl") == tr.read_jsonl(FIXTURES / f"{name}.jsonl")
+
+
+@pytest.mark.req("P2-1")
+def test_rc_url_in_file_matches_rc_url(tmp_path):
+    f = tmp_path / "t.jsonl"
+    url = "https://claude.ai/code/session_x"
+    lines = [{"type": "user", "message": {"role": "user", "content": "system 이라는 단어"}},
+             {"type": "system", "subtype": "bridge_status", "url": url},
+             {"type": "assistant", "message": {"content": [{"type": "text", "text": "ok"}]}}]
+    f.write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in lines), encoding="utf-8")
+    assert tr.rc_url_in_file(f) == tr.rc_url(tr.read_jsonl(f)) == url
+    with open(f, "a", encoding="utf-8") as w:
+        w.write(json.dumps({"type": "system", "content": "Remote Control disconnected"}) + "\n")
+    assert tr.rc_url_in_file(f) is None and tr.rc_url(tr.read_jsonl(f)) is None
+    assert tr.rc_url_in_file(None) is None and tr.rc_url_in_file(tmp_path / "none.jsonl") is None
+
+
 # ---------- P2-2 ----------
 
 @pytest.mark.req("P2-2")

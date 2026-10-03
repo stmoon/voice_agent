@@ -113,6 +113,27 @@ def test_install_dispatches_by_platform(monkeypatch):
     assert seen == ["win", "linux", "mac"]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object")
+def test_kill_on_close_job_takes_child_down_with_it():
+    """작업 스케줄러가 브리지를 강제 종료해도(= Job 핸들이 닫혀도) cloudflared 같은 자식이 남지 않아야 한다."""
+    import ctypes
+
+    from bridge.proc import KillOnCloseJob
+
+    job = KillOnCloseJob()
+    assert job.handle
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    try:
+        assert job.add(p) is True
+        assert job.add(object()) is False  # 프로세스 핸들이 없는 대역은 건너뜀 (예외 없이)
+        ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(job.handle))
+        assert p.wait(timeout=10) is not None
+    finally:
+        if p.poll() is None:
+            p.kill()
+
+
 def test_windows_notification_does_not_block():
     started = []
     service.notify("음성 브리지 주소가 바뀌었습니다", "abc's host", popen=lambda args, **kw: started.append((args, kw)),

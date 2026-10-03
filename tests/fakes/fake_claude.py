@@ -16,7 +16,7 @@
 - `--bg -n 이름 --remote-control 이름`: 백그라운드 세션 등록 후 바로 종료 (transcript 에 권한 모드·RC 기록)
 - `attach <id>`: 백그라운드 세션에 붙은 화면. 대기 표시는 "⏸ manual mode on · ← for agents" (실측)
 환경변수 FAKE_DIALOG=1 기동 시 온보딩 대화상자, FAKE_TRUST=1 폴더 신뢰 대화상자, FAKE_NO_PERM_HOOKS=1 권한 훅 미발생,
-FAKE_NO_RC=1 RC 미연결, FAKE_AGENTS_FAIL=1 agents 조회 실패.
+FAKE_NO_RC=1 RC 미연결, FAKE_AGENTS_FAIL=1 agents 조회 실패, FAKE_OLD_CLI=1 오래된 CLI(2.1.131: agents --json 없음).
 """
 import json
 import os
@@ -28,7 +28,8 @@ import uuid
 
 WINDOWS = os.name == "nt"
 if WINDOWS:
-    import msvcrt
+    import ctypes
+    from ctypes import wintypes
 else:
     import select
     import termios
@@ -214,25 +215,80 @@ def assistant(content, stop):
 
 
 def read_key(timeout):
-    if WINDOWS:  # ConPTY 입력은 콘솔 키 이벤트로 들어온다
-        end = time.time() + timeout
-        while time.time() < end:
-            if msvcrt.kbhit():
-                chars = []
-                while msvcrt.kbhit():
-                    chars.append(msvcrt.getwch())
-                return _win_keys("".join(chars))
-            time.sleep(0.01)
-        return None
+    if WINDOWS:
+        return _win_read_key(timeout)
     r, _, _ = select.select([sys.stdin], [], [], timeout)
     if not r:
         return None
     return os.read(sys.stdin.fileno(), 4096).decode("utf-8", "replace")
 
 
-def _win_keys(k):
-    """msvcrt 키 코드 → 터미널 바이트: Backspace \\x08 → \\x7f, Shift+Tab (\\x00|\\xe0)\\x0f → \\x1b[Z."""
-    return k.replace("\x00\x0f", "\x1b[Z").replace("\xe0\x0f", "\x1b[Z").replace("\x08", "\x7f")
+# ---------- Windows 콘솔 입력 ----------
+# ConPTY 입력은 콘솔 키 이벤트(INPUT_RECORD)로 들어온다. 실제 claude(node)처럼 ReadConsoleInputW 로 직접 읽는다.
+# msvcrt.kbhit/getwch 는 DBCS 코드 페이지(한국어 Windows 949)에서 한글 키를 읽은 뒤 남은 키 해제 이벤트가
+# 2바이트로 쪼개져 보여, 뒤따르는 Enter 를 놓친다 (실측: 다른 키가 더 들어올 때까지 Enter 가 안 읽힘).
+
+if WINDOWS:
+    class _KeyEvent(ctypes.Structure):
+        _fields_ = [("bKeyDown", wintypes.BOOL), ("wRepeatCount", wintypes.WORD), ("wVirtualKeyCode", wintypes.WORD),
+                    ("wVirtualScanCode", wintypes.WORD), ("UnicodeChar", wintypes.WCHAR),
+                    ("dwControlKeyState", wintypes.DWORD)]
+
+    class _EventUnion(ctypes.Union):
+        _fields_ = [("KeyEvent", _KeyEvent), ("_pad", ctypes.c_byte * 16)]
+
+    class _InputRecord(ctypes.Structure):
+        _fields_ = [("EventType", wintypes.WORD), ("Event", _EventUnion)]
+
+    _K32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _K32.GetStdHandle.restype = wintypes.HANDLE
+    _K32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    _K32.ReadConsoleInputW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_InputRecord), wintypes.DWORD,
+                                       ctypes.POINTER(wintypes.DWORD)]
+    _K32.GetNumberOfConsoleInputEvents.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    _STDIN = _K32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+    _KEY_EVENT, _VK_TAB, _VK_BACK, _SHIFT = 0x0001, 0x09, 0x08, 0x0010
+
+
+def _win_key(vk, ch, ctrl_state):
+    """키 이벤트 → 터미널 바이트: Backspace → \\x7f, Shift+Tab → \\x1b[Z. 나머지는 입력된 문자 그대로."""
+    if vk == _VK_TAB and ctrl_state & _SHIFT:
+        return "\x1b[Z"
+    if vk == _VK_BACK:
+        return "\x7f"
+    return ch if ch != "\x00" else ""
+
+
+def _win_drain():
+    """지금 쌓인 콘솔 입력 이벤트를 모두 읽어 키 입력 문자열로."""
+    n = wintypes.DWORD()
+    if not _K32.GetNumberOfConsoleInputEvents(_STDIN, ctypes.byref(n)) or not n.value:
+        return ""
+    buf = (_InputRecord * n.value)()
+    got = wintypes.DWORD()
+    if not _K32.ReadConsoleInputW(_STDIN, buf, n.value, ctypes.byref(got)):
+        return ""
+    keys = []
+    for r in buf[: got.value]:
+        if r.EventType != _KEY_EVENT or not r.Event.KeyEvent.bKeyDown:
+            continue
+        ke = r.Event.KeyEvent
+        keys.append(_win_key(ke.wVirtualKeyCode, ke.UnicodeChar, ke.dwControlKeyState) * max(1, ke.wRepeatCount))
+    # UTF-16 서로게이트 쌍(이모지 등)은 이벤트 2개로 온다 → 합친다
+    return "".join(keys).encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+
+
+def _win_read_key(timeout):
+    end = time.time() + timeout
+    while True:
+        left = end - time.time()
+        if left <= 0:
+            return None
+        if _K32.WaitForSingleObject(_STDIN, max(1, int(min(left, 0.05) * 1000))) != 0:  # WAIT_OBJECT_0
+            continue
+        keys = _win_drain()
+        if keys:
+            return keys
 
 
 SPIN = "✻✶✳✢·"
@@ -331,7 +387,13 @@ def main():
     signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))  # 종료돼도 finally(등록부 정리) 실행
     if hasattr(signal, "SIGHUP"):
         signal.signal(signal.SIGHUP, lambda *a: sys.exit(0))
+    if args[:1] == ["--version"]:
+        print("2.1.131 (Claude Code)" if os.environ.get("FAKE_OLD_CLI") == "1" else "2.1.286 (Claude Code)")
+        return
     if args[:2] == ["agents", "--json"]:
+        if os.environ.get("FAKE_OLD_CLI") == "1":  # 실측 2.1.131: agents 에 --json 이 없다
+            sys.stderr.write("error: unknown option '--json'\n")
+            sys.exit(1)
         return cmd_agents()
     if "--bg" in args:
         return cmd_bg()

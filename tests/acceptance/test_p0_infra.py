@@ -138,6 +138,9 @@ def test_make_verify_runs_tests_then_sync():
 
 @pytest.mark.req("P0-3")
 def test_stop_hook_runs_make_verify():
-    settings = json.loads((ROOT / ".claude" / "settings.json").read_text())
+    path = ROOT / ".claude" / "settings.json"
+    if not path.exists():  # 개인 설정이라 레포에 없다 (CI·새 클론) → 판단 보류
+        pytest.skip("개인 Claude Code 훅 설정(.claude/settings.json)이 없음 — README 'Stop 훅 연결' 참고")
+    settings = json.loads(path.read_text(encoding="utf-8"))
     cmds = [h["command"] for g in settings["hooks"]["Stop"] for h in g["hooks"]]
     assert any("make" in c and "verify" in c for c in cmds)

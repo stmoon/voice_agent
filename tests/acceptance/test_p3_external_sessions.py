@@ -224,21 +224,27 @@ def test_control_sequences_never_reach_session(manager):
 
 # ---------------- 실제 claude ----------------
 
+def _claude(*args, **kw):
+    """실제 claude 실행: 브리지와 같은 방식 (UTF-8 로 읽음 — 한국어 Windows 기본 cp949 로 읽으면 '·' 가 깨진다,
+    npm 설치본 claude.cmd 도 실행)."""
+    from bridge.proc import run_quiet
+    from bridge.pty_runner import child_env
+
+    return run_quiet(["claude", *args], env=child_env(), text=True, timeout=60, **kw)
+
+
 def _real_agents():
-    return json.loads(subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True).stdout or "[]")
+    return json.loads(_claude("agents", "--json").stdout or "[]")
 
 
 @pytest.fixture
 def real_bg(live_workdir):
-    from bridge.pty_runner import child_env
-
     name = f"vc-live-bg-{int(time.time()) % 100000}"
-    out = subprocess.run(["claude", "--bg", "-n", name, "--remote-control", name, "--permission-mode", "default"],
-                         cwd=live_workdir, env=child_env(), capture_output=True, text=True, timeout=60).stdout
+    out = _claude("--bg", "-n", name, "--remote-control", name, "--permission-mode", "default", cwd=live_workdir).stdout
     short = out.split("·")[1].strip()
     yield name, short
-    subprocess.run(["claude", "stop", short], capture_output=True, timeout=60)
-    subprocess.run(["claude", "rm", short], capture_output=True, timeout=60)
+    _claude("stop", short)
+    _claude("rm", short)
 
 
 @pytest.mark.live

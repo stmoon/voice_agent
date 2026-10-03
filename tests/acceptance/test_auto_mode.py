@@ -108,8 +108,6 @@ def test_prompt_box_ready_recognizes_auto_footer(screen, ok):
 # --- 모드 변경은 transcript 에 늦게 기록된다 (실측) → 화면 하단의 현재 모드로 막는다 ---
 
 @pytest.mark.req("P3-3")
-@pytest.mark.skipif(__import__("sys").platform == "win32",
-                    reason="가짜 claude 의 Windows 콘솔 입력(msvcrt)으로는 Shift+Tab 을 구분할 수 없음 — 실기에서 확인")
 def test_mode_switched_on_screen_blocks_before_transcript_records_it(manager):
     s = manager.start_session("테스트 세션")
     manager.select_session("테스트 세션")

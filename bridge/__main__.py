@@ -33,6 +33,12 @@ def cmd_serve(args, cfg: BridgeConfig) -> int:
               "세션을 띄우지 않고 종료합니다.", file=sys.stderr)
         return 2
     manager = SessionManager(cfg)
+    from .agents import claude_doctor
+
+    doc = claude_doctor(cfg.claude_bin, env=manager._env())
+    print(f"[bridge] claude: {doc['path'] or '(찾을 수 없음)'} {doc['version'] or ''}".rstrip(), file=sys.stderr)
+    if doc["problem"]:  # 서버는 띄운다 (휴대폰에서 list_sessions 의 warning 으로도 알 수 있게)
+        print(f"[bridge] 경고: {doc['problem']}", file=sys.stderr)
     names = list(dict.fromkeys([*cfg.autostart, *(args.start or [])]))  # 설정 autostart + --start, 중복 제거
     for name in names:
         try:
@@ -226,12 +232,19 @@ def cmd_session(args, cfg: BridgeConfig) -> int:
 
 
 def cmd_info(args, cfg: BridgeConfig) -> int:
+    from .agents import claude_doctor
+    from .pty_runner import child_env
+
     print(f"config    : {default_config_path()}")
     print(f"host_id   : {cfg.host_id}")
     print(f"listen    : {cfg.bind}:{cfg.port}")
     print(f"presets   : {', '.join(cfg.sessions) or '(없음)'}")
     print(f"autostart : {', '.join(cfg.autostart) or '(없음)'}")
     print(f"hosts     : {', '.join(cfg.allowed_hosts) or '(없음)'}")
+    doc = claude_doctor(cfg.claude_bin, env=child_env())
+    print(f"claude    : {doc['path'] or '(찾을 수 없음)'}  {doc['version'] or ''}".rstrip())
+    if doc["problem"]:
+        print(f"문제      : {doc['problem']}")
     return 0
 
 

@@ -97,7 +97,16 @@ class KillOnCloseJob:
         import ctypes
         from ctypes import wintypes
 
-        k = ctypes.windll.kernel32
+        # 전용 WinDLL 인스턴스에 인자 형식을 지정한다 (HANDLE 을 C int 로 넘기면 64비트에서 잘릴 수 있음.
+        # 공용 ctypes.windll 은 다른 모듈과 함수 객체를 공유하므로 건드리지 않는다)
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        k.CreateJobObjectW.restype = wintypes.HANDLE
+        k.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        k.SetInformationJobObject.restype = wintypes.BOOL
+        k.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        k.AssignProcessToJobObject.restype = wintypes.BOOL
+        self._k32 = k
 
         class IO_COUNTERS(ctypes.Structure):
             _fields_ = [(n, ctypes.c_ulonglong) for n in ("ReadOperationCount", "WriteOperationCount",
@@ -116,7 +125,6 @@ class KillOnCloseJob:
                         ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
                         ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
 
-        k.CreateJobObjectW.restype = wintypes.HANDLE
         job = k.CreateJobObjectW(None, None)
         if not job:
             return
@@ -126,9 +134,8 @@ class KillOnCloseJob:
             self.handle = job
 
     def add(self, popen: subprocess.Popen) -> bool:
-        handle = getattr(popen, "_handle", None)  # 진짜 Popen 만 프로세스 핸들이 있다
-        if not self.handle or handle is None:
+        """자식 프로세스를 Job 에 넣는다. 프로세스 핸들이 없는 객체(테스트 대역 등)는 건너뛴다."""
+        handle = getattr(popen, "_handle", None)  # subprocess.Popen 의 Windows 프로세스 핸들
+        if not self.handle or not handle:
             return False
-        import ctypes
-
-        return bool(ctypes.windll.kernel32.AssignProcessToJobObject(self.handle, int(handle)))
+        return bool(self._k32.AssignProcessToJobObject(self.handle, int(handle)))

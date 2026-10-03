@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -65,6 +66,68 @@ def read_jsonl(path: Path | None) -> list[dict]:
             except json.JSONDecodeError:
                 continue
     return out
+
+
+class JsonlReader:
+    """append 만 되는 transcript 를 이어 읽는다: 지난번 이후 새로 완결된 줄만 파싱.
+    긴 세션의 transcript 는 수십 MB 라(실측 38MB, 전체 파싱 0.17초) 상태를 볼 때마다 처음부터 읽으면 느리다.
+    다른 파일이 되었거나 크기가 줄었으면(교체·잘림) 처음부터 다시 읽는다. 결과는 read_jsonl 과 같다."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._ident: tuple | None = None
+        self._offset = 0                 # 파싱을 마친 바이트 위치 (항상 줄 끝 다음)
+        self._records: list[dict] = []
+
+    def read(self, path: Path | None) -> list[dict]:
+        if path is None:
+            return []
+        try:
+            st = path.stat()
+        except OSError:
+            return []
+        ident = (str(path), st.st_dev, st.st_ino)
+        with self._lock:
+            if ident != self._ident or st.st_size < self._offset:
+                self._ident, self._offset, self._records = ident, 0, []
+            if st.st_size > self._offset:
+                try:
+                    with open(path, "rb") as f:
+                        f.seek(self._offset)
+                        chunk = f.read()
+                except OSError:
+                    return list(self._records)
+                end = chunk.rfind(b"\n")
+                if end >= 0:   # 개행 없는 마지막 조각은 아직 기록 중 → 다음에
+                    for line in chunk[:end].split(b"\n"):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:  # 깨진 UTF-8 은 대체 문자로, 깨진 JSON 은 건너뜀 (read_jsonl 과 같게)
+                            self._records.append(json.loads(line.decode("utf-8", "replace")))
+                        except json.JSONDecodeError:
+                            continue
+                    self._offset += end + 1
+            return list(self._records)  # 호출자가 들고 있는 목록이 나중에 바뀌지 않게 복사본
+
+
+def rc_url_in_file(path: Path | None) -> str | None:
+    """보기 전용 세션 목록용 rc_url: 큰 transcript 를 전부 JSON 으로 파싱하지 않고 system 레코드 줄만 골라 판정."""
+    if path is None:
+        return None
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    recs = []
+    for line in data.split(b"\n")[:-1]:  # 완결된 줄만
+        if b'"system"' not in line:
+            continue
+        try:
+            recs.append(json.loads(line))
+        except ValueError:
+            continue
+    return rc_url(recs)
 
 
 # ---------- 레코드 분류 ----------
