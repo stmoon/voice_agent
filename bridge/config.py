@@ -50,6 +50,7 @@ class BridgeConfig:
     autostart: list[str] = field(default_factory=list)      # serve 시 자동으로 띄울 프리셋 이름
     ready_timeout: float = 60.0
     inject_ack_timeout: float = 20.0
+    wait_timeout: float = 50.0    # send_command/get_result(wait) 가 결과를 기다리는 최대 시간 (Cloudflare 100초 제한보다 짧게)
     quiet_window: float = 4.0     # 이 시간 동안 조용하면(아래 속도 미만) 대기로 본다
     quiet_rate: float = 150.0     # 출력 문자/초. 실측: 작업 중 500~1100, 대기 0~50
     allowed_hosts: list[str] = field(default_factory=list)  # 터널 도메인 (Host 헤더)

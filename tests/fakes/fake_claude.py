@@ -245,6 +245,9 @@ def run_prompt(text):
             rec({"type": "user", "message": {"role": "user", "content": [
                 {"type": "text", "text": "[Request interrupted by user for tool use]"}]}})
             return
+    elif "PAUSE" in text:  # 4초 동안 일한 뒤 응답 (기다림 테스트용)
+        wait_key(["\x1b"], 4, spinner=True)
+        assistant([{"type": "text", "text": "PAUSED DONE"}], "end_turn")
     elif "SLOW" in text:
         tid = "toolu_" + uuid.uuid4().hex[:8]
         assistant([{"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": "sleep 30"}}], "tool_use")

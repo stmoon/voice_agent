@@ -46,6 +46,7 @@ def fake_config(tmp_path, workdir):
         sessions={"테스트 세션": str(workdir), "다른 세션": str(workdir)},
         ready_timeout=15,
         inject_ack_timeout=10,
+        wait_timeout=3,
     )
     return cfg
 

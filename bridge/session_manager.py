@@ -92,6 +92,7 @@ class Request:
     text: str
     offset: int
     sent_at: float
+    last_reported: str = tr.WORKING   # 마지막으로 돌려준 상태 (승인 대기를 한 번만 알리기 위해)
 
 
 @dataclass
@@ -562,7 +563,8 @@ class SessionManager:
         return self._sessions[self._selected]
 
     # ---------- 명령 주입 (P3-3, P3-6) ----------
-    def send_command(self, text: str) -> dict:
+    def send_command(self, text: str, wait: bool = False) -> dict:
+        """명령 주입. wait=True 면 결과가 나오거나 승인이 필요해질 때까지 최대 wait_timeout 초 기다렸다가 함께 돌려준다."""
         text = sanitize_command(text)
         with self._lock:
             s = self.selected
@@ -596,8 +598,40 @@ class SessionManager:
                 s.inflight = None
                 raise BridgeError("inject_failed", f"'{s.name}' 세션에 입력하지 못했습니다 ({e.__class__.__name__}).")
             self._requests[req.id] = req
-        return {"ok": True, "request_id": req.id, "session": s.name, "status": tr.WORKING,
-                "status_ko": STATUS_KO[tr.WORKING]}
+        started = {"ok": True, "request_id": req.id, "session": s.name, "status": tr.WORKING,
+                   "status_ko": STATUS_KO[tr.WORKING]}
+        if not wait:
+            return started
+        return {**started, **self.wait_result(req.id)}
+
+    def wait_result(self, request_id: str, timeout: float | None = None, poll: float = 0.5) -> dict:
+        """결과가 나오거나(완료·중단), 새로 승인이 필요해질 때까지 최대 timeout 초 기다린다.
+        MCP 는 서버가 대화에 먼저 말을 걸 수 없으므로, 휴대폰 Claude 가 이걸 반복 호출해 결과가 나오는 즉시 보고한다.
+        반환: get_result 결과 + final(끝났는지). 이미 알린 승인 대기는 다시 즉시 돌려주지 않는다(헛도는 호출 방지)."""
+        timeout = self.config.wait_timeout if timeout is None else timeout
+        req = self._requests.get(request_id)
+        if req is None:
+            raise BridgeError("no_request", f"요청 ID {request_id} 를 찾을 수 없습니다.")
+        end = time.time() + timeout
+        seen_other = False
+        while True:
+            d = self.get_result(request_id)
+            st = d["status"]
+            if st in (tr.DONE, tr.INTERRUPTED):
+                break
+            if st == tr.AWAITING_APPROVAL:
+                if req.last_reported != tr.AWAITING_APPROVAL or seen_other:
+                    break  # 새로 승인이 필요해짐 → 바로 알린다
+            else:
+                seen_other = True
+            if time.time() >= end:
+                break
+            time.sleep(poll)
+        req.last_reported = st
+        d["final"] = st in (tr.DONE, tr.INTERRUPTED)
+        if not d["final"]:
+            d["next"] = "끝나지 않았습니다. 사용자에게 묻지 말고 get_result(request_id, wait=true) 를 다시 호출해 계속 기다리세요."
+        return d
 
     def _settled_status(self, s: Session, records: list[dict]) -> str:
         """주입 직전 상태: 실시간 상태를 새로 조회하고, 방금 끝난 턴이면 상태가 idle 로 바뀌기를 잠깐 기다린다

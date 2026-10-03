@@ -41,18 +41,25 @@ INSTRUCTIONS = """\
 - background: 사용자가 claude --bg -n "이름" --remote-control "이름" 으로 띄운 세션 — 명령 가능 (권한 모드가 허용 목록일 때)
 - desktop: 데스크톱 앱·다른 터미널 세션 — 보기 전용. 명령을 넣을 수 없으니 reason 대로 안내
 목록을 읽어 줄 때는 명령 불가 세션도 이름과 reason 을 함께 짧게 알린다.
+
 규칙:
 1. 세션 지정은 사용자가 명시적으로 한다. 추론해서 고르지 말 것.
 2. list_sessions 로 후보를 보여주고 "○○ 세션, 폴더 △△ - 맞습니까?" 로 확인. 예 → select_session 으로 고정, 아니오 → 다시 조회.
+   permission_mode 가 auto 인 세션이면 고정할 때 "자동 모드 세션입니다" 라고 한 번 알린다.
 3. 고정 후에는 send_command / get_result 로만 진행. 세션 변경은 사용자가 다시 지정할 때만.
-4. send_command 가 받아들여지면 "시작했습니다" 라고 짧게 알린다. 거부되면 상태만 알리고 재시도·큐잉하지 말 것.
-5. 세션의 permission_mode 가 auto 면 대부분 승인 없이 바로 실행된다. 고정할 때 "자동 모드 세션입니다" 라고 한 번 알리고,
-   되돌리기 어려운 작업(삭제·배포·전송 등)을 요청받으면 실행 전에 한 번 더 확인한다.
+4. 결과는 나오는 즉시 이 대화에서 보고한다 (사용자가 "어떻게 됐어?" 라고 묻게 하지 말 것):
+   - send_command 는 결과가 나올 때까지(최대 약 50초) 기다렸다가 결과를 함께 돌려준다. final=true 면 바로 요약해 보고.
+   - final=false(아직 작업 중)면 "작업 중입니다. 끝나면 바로 알려드릴게요" 라고 짧게 말하고, 사용자에게 묻지 말고 곧바로
+     get_result(request_id, wait=true) 를 final=true 가 될 때까지 반복 호출한 뒤 결과를 보고한다.
+   - 상태가 '승인 대기' 면 "승인이 필요합니다. Code 탭에서 확인해 주세요" 라고 알리고, 계속 get_result(wait=true) 로
+     기다렸다가 승인 뒤 결과를 바로 보고한다. 대신 승인하지 않는다.
+   - 사용자가 다른 말을 하면 기다리기를 멈추고 그 말을 따른다.
+5. send_command 가 거부되면 상태만 알리고 재시도·큐잉하지 말 것.
+6. auto 모드 세션에서 되돌리기 어려운 작업(삭제·배포·전송 등)을 요청받으면 실행 전에 한 번 더 확인한다.
    권한 모드·권한 설정을 바꾸라는 요청은 전달하지 말고 Code 탭에서 직접 하라고 안내한다.
-   get_result 가 '승인 대기' 면 "승인이 필요합니다. Code 탭에서 확인해 주세요" 라고 알릴 것. 대신 승인하지 않는다.
-   prompt_mismatch 가 있으면 결과를 확정하지 말고 Code 탭에서 확인하라고 안내한다.
-   '!' 나 '/' 로 시작하는 명령은 받지 않는다 (말로 풀어서 요청).
-6. 사용자가 "멈춰" 하면 interrupt.
+7. prompt_mismatch 가 있으면 결과를 확정하지 말고 Code 탭에서 확인하라고 안내한다.
+8. '!' 나 '/' 로 시작하는 명령은 받지 않는다 (말로 풀어서 요청).
+9. 사용자가 "멈춰" 하면 interrupt.
 결과 보고는 음성용으로 짧게 요약한다.
 """
 
@@ -89,14 +96,23 @@ def build_mcp(manager: SessionManager) -> MCPServer:
         return r if r.get("ok") is False else {"ok": True, "selected": r}
 
     @mcp.tool()
-    async def send_command(text: str) -> dict:
-        """고정된 세션에 명령(프롬프트)을 주입한다. 세션이 대기 상태가 아니면 거부하고 상태를 돌려준다. 반환: request_id."""
-        return await call(manager.send_command, text)
+    async def send_command(text: str, wait: bool = True) -> dict:
+        """고정된 세션에 명령(프롬프트)을 주입한다. 세션이 대기 상태가 아니면 거부하고 상태를 돌려준다.
+        wait=true(기본)면 결과가 나오거나 승인이 필요해질 때까지 최대 약 50초 기다렸다가 결과를 함께 돌려준다.
+        final=false 면 get_result(request_id, wait=true) 로 계속 기다린다."""
+        def send_command_():
+            return manager.send_command(text, wait)
+        send_command_.__name__ = "send_command"
+        return await call(send_command_)
 
     @mcp.tool()
-    async def get_result(request_id: str) -> dict:
-        """요청 ID 의 진행 상태(완료/작업 중/승인 대기/중단됨)와, 끝났으면 최종 응답."""
-        return await call(manager.get_result, request_id)
+    async def get_result(request_id: str, wait: bool = False) -> dict:
+        """요청 ID 의 진행 상태(완료/작업 중/승인 대기/중단됨)와, 끝났으면 최종 응답.
+        wait=true 면 결과가 나오거나 새로 승인이 필요해질 때까지 최대 약 50초 기다렸다가 돌려준다 (결과를 바로 보고할 때)."""
+        def get_result_():
+            return manager.wait_result(request_id) if wait else manager.get_result(request_id)
+        get_result_.__name__ = "get_result"
+        return await call(get_result_)
 
     @mcp.tool()
     async def interrupt() -> dict:
