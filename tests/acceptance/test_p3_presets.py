@@ -62,7 +62,9 @@ def test_running_bridge_picks_up_new_preset_without_restart(manager, tmp_path, w
 
 
 def test_claude_trust_lookup(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    from pathlib import Path
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))  # Windows 는 HOME 대신 USERPROFILE
     (tmp_path / "proj" / "sub").mkdir(parents=True)
     (tmp_path / ".claude.json").write_text(json.dumps(
         {"projects": {str((tmp_path / "proj").resolve()): {"hasTrustDialogAccepted": True}}}))

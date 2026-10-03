@@ -187,7 +187,7 @@ def test_permission_dialog_without_hooks_is_awaiting_approval(manager, monkeypat
     assert e.value.code == "busy"
     s.proc.write("y")  # 사람이 승인
     assert wait_until(lambda: _done(manager, r["request_id"]))["response"] == "APPROVED"
-    assert s.prompt_box_ready()
+    assert wait_until(s.prompt_box_ready, timeout=5)
 
 
 @pytest.mark.req("P3-3")

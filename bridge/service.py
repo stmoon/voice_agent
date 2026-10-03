@@ -9,7 +9,7 @@
 | OS | 방식 | 재시작 | 로그 |
 |---|---|---|---|
 | macOS | launchd LaunchAgent (com.voicebridge.*) | 10초 뒤 | ~/Library/Logs/voice-bridge/ |
-| Windows | 작업 스케줄러 \\VoiceBridge\\{serve,tunnel} (로그온 트리거, pythonw 로 창 없이) | 1분 뒤(작업 스케줄러 최소값) | %LOCALAPPDATA%\\voice-bridge\\logs |
+| Windows | 작업 스케줄러 VoiceBridge-{serve,tunnel} (로그온 + 1분 반복 감시, pythonw 로 창 없이) | 1분 안 | %LOCALAPPDATA%\\voice-bridge\\logs |
 | Linux | systemd 사용자 서비스 voice-bridge-{serve,tunnel} | 10초 뒤 | ~/.local/state/voice-bridge/logs |
 """
 from __future__ import annotations
@@ -36,7 +36,7 @@ def log_dir(platform: str = sys.platform) -> Path:
 AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 LOG_DIR = log_dir()
 SYSTEMD_DIR = Path.home() / ".config" / "systemd" / "user"
-WIN_TASK_FOLDER = "VoiceBridge"
+WIN_TASK_PREFIX = "VoiceBridge-"   # 루트에 등록 (일반 권한으로 하위 폴더를 만들 수 없는 경우가 있음)
 COMMANDS = ("serve", "tunnel")
 TUNNEL_HOST_RE = re.compile(r"https://([a-z0-9-]+\.trycloudflare\.com)")
 QUICKTUNNEL_METRICS = "127.0.0.1:20241"
@@ -91,7 +91,7 @@ def plists() -> dict[str, dict]:
 
 
 def _domain() -> str:
-    return f"gui/{os.getuid()}"
+    return f"gui/{getattr(os, 'getuid', lambda: 0)()}"
 
 
 def _launchctl(*args: str, run=subprocess.run) -> subprocess.CompletedProcess:
@@ -152,27 +152,37 @@ _WIN_ENTRY = "import sys; from bridge.__main__ import main; sys.exit(main(sys.ar
 
 
 def win_task_xml(cmd: str, user: str | None = None) -> str:
-    """로그온 시 시작, 실패하면 1분 뒤 재시작(작업 스케줄러 최소 간격), 실행 시간 제한 없음, 배터리여도 실행."""
+    """로그온 시 시작 + 1분마다 반복 트리거(이미 돌고 있으면 무시 = 죽어 있으면 다시 띄우는 감시자).
+    '실패 시 다시 시작'은 비정상 종료 코드에는 동작하지 않을 수 있어 반복 트리거를 주 장치로 쓴다.
+    실행 시간 제한 없음, 배터리여도 실행, 보통 우선순위. 파이썬은 -P 로 홈 폴더를 import 경로에 넣지 않는다."""
     from xml.sax.saxutils import escape
 
     user = user or (f"{os.environ.get('USERDOMAIN')}\\{os.environ.get('USERNAME')}"
                     if os.environ.get("USERNAME") else None)
     log = log_dir("win32") / f"{cmd}.log"
-    args = f'-c "{_WIN_ENTRY}" {cmd} --log "{log}"'
+    args = f'-P -c "{_WIN_ENTRY}" {cmd} --log "{log}"'
     uid = f"<UserId>{escape(user)}</UserId>" if user else ""
     return f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>voice-bridge {cmd}</Description></RegistrationInfo>
-  <Triggers><LogonTrigger><Enabled>true</Enabled>{uid}</LogonTrigger></Triggers>
+  <Triggers>
+    <LogonTrigger>
+      <Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
+      <Enabled>true</Enabled>{uid}
+    </LogonTrigger>
+  </Triggers>
   <Principals><Principal id="Author">{uid}<LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
   <Settings>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>
+    <AllowHardTerminate>true</AllowHardTerminate>
     <StartWhenAvailable>true</StartWhenAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
     <Enabled>true</Enabled>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>5</Priority>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>255</Count></RestartOnFailure>
   </Settings>
   <Actions Context="Author">
     <Exec>
@@ -186,7 +196,16 @@ def win_task_xml(cmd: str, user: str | None = None) -> str:
 
 
 def _win_task(cmd: str) -> str:
-    return f"{WIN_TASK_FOLDER}\\{cmd}"
+    return f"{WIN_TASK_PREFIX}{cmd}"
+
+
+def _win_run_kw() -> dict:
+    """schtasks·powershell 출력은 OEM 코드 페이지 (UTF-8 모드에서도 깨지지 않게)."""
+    kw = {"capture_output": True, "text": True, "errors": "replace"}
+    if sys.platform == "win32":
+        kw["encoding"] = "oem"
+        kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return kw
 
 
 def _install_windows(run=subprocess.run, state_dir: Path | None = None) -> list[str]:
@@ -199,10 +218,11 @@ def _install_windows(run=subprocess.run, state_dir: Path | None = None) -> list[
     for cmd in COMMANDS:
         xml = task_dir / f"{cmd}.xml"
         xml.write_text(win_task_xml(cmd), encoding="utf-16")  # schtasks /XML 은 UTF-16 을 기대
-        r = run(["schtasks", "/Create", "/TN", _win_task(cmd), "/XML", str(xml), "/F"], capture_output=True, text=True)
+        run(["schtasks", "/End", "/TN", _win_task(cmd)], **_win_run_kw())  # 재설치: 옛 인스턴스 먼저 내림 (IgnoreNew)
+        r = run(["schtasks", "/Create", "/TN", _win_task(cmd), "/XML", str(xml), "/F"], **_win_run_kw())
         if r.returncode != 0:
             raise SystemExit(f"작업 등록 실패({cmd}): {(r.stderr or r.stdout).strip()}")
-        run(["schtasks", "/Run", "/TN", _win_task(cmd)], capture_output=True, text=True)
+        run(["schtasks", "/Run", "/TN", _win_task(cmd)], **_win_run_kw())
         done.append(_win_task(cmd))
     return done
 
@@ -210,8 +230,8 @@ def _install_windows(run=subprocess.run, state_dir: Path | None = None) -> list[
 def _uninstall_windows(run=subprocess.run) -> list[str]:
     removed = []
     for cmd in COMMANDS:
-        run(["schtasks", "/End", "/TN", _win_task(cmd)], capture_output=True, text=True)
-        r = run(["schtasks", "/Delete", "/TN", _win_task(cmd), "/F"], capture_output=True, text=True)
+        run(["schtasks", "/End", "/TN", _win_task(cmd)], **_win_run_kw())
+        r = run(["schtasks", "/Delete", "/TN", _win_task(cmd), "/F"], **_win_run_kw())
         if r.returncode == 0:
             removed.append(_win_task(cmd))
     return removed
@@ -219,11 +239,11 @@ def _uninstall_windows(run=subprocess.run) -> list[str]:
 
 def _status_windows(run=subprocess.run) -> dict[str, str]:
     """PowerShell 의 State 는 OS 언어와 무관하게 영문(Running/Ready/Disabled)이라 schtasks 출력 대신 쓴다."""
-    ps = (f"Get-ScheduledTask -TaskPath '\\{WIN_TASK_FOLDER}\\' -ErrorAction SilentlyContinue | "
+    ps = (f"Get-ScheduledTask -TaskName '{WIN_TASK_PREFIX}*' -ErrorAction SilentlyContinue | "
           "ForEach-Object { $_.TaskName + '=' + $_.State }")
-    r = run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True)
+    r = run(["powershell", "-NoProfile", "-Command", ps], **_win_run_kw())
     found = dict(line.strip().split("=", 1) for line in (r.stdout or "").splitlines() if "=" in line)
-    return {_win_task(c): found.get(c, "등록 안 됨") for c in COMMANDS}
+    return {_win_task(c): found.get(_win_task(c), "등록 안 됨") for c in COMMANDS}
 
 
 # ---------- Linux: systemd 사용자 서비스 ----------
@@ -343,6 +363,9 @@ def notify(title: str, message: str, run=subprocess.run, popen=subprocess.Popen,
         pass
 
 
+_JOBS: list = []   # Job Object 핸들을 프로세스 수명 동안 붙잡아 둔다
+
+
 def host_file(state_dir: Path) -> Path:
     return state_dir / "tunnel_host"
 
@@ -355,6 +378,12 @@ def run_tunnel(port: int, state_dir: Path, popen=subprocess.Popen, run=subproces
     p = popen(["cloudflared", "tunnel", "--url", f"http://localhost:{port}", "--metrics", QUICKTUNNEL_METRICS],
               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
               encoding="utf-8", errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if sys.platform == "win32":
+        # Windows 는 부모가 강제 종료돼도(작업 스케줄러 /End) cloudflared 가 남는다 → 함께 끝나도록 Job Object 에 묶음
+        from .proc import KillOnCloseJob
+
+        _JOBS.append(KillOnCloseJob())
+        _JOBS[-1].add(p)
     seen = False
     for line in p.stdout:
         out.write(line)

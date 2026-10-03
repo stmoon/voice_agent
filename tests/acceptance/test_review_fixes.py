@@ -11,10 +11,14 @@ from tests.conftest import wait_until
 
 
 def set_live(cfg, sid, status):
+    import os
+
     f = cfg.claude_config_dir / "fake_agents" / f"{sid}.json"
-    e = json.loads(f.read_text())
+    e = json.loads(f.read_text(encoding="utf-8"))
     e["status"] = status
-    f.write_text(json.dumps(e, ensure_ascii=False))
+    tmp = f.with_suffix(".test.tmp")
+    tmp.write_text(json.dumps(e, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, f)
 
 
 def append(s, rec):
@@ -115,6 +119,9 @@ def test_live_busy_overrides_finished_turn(manager, fake_config):
     manager.select_session("테스트 세션")
     r = manager.send_command("first")
     wait_until(lambda: done(manager, r["request_id"]))
+    reg = fake_config.claude_config_dir / "fake_agents" / f"{s.session_id}.json"
+    # 가짜의 턴 뒤처리(Stop 훅 → idle 화면)가 끝난 뒤에 상태를 바꿔야 덮어쓰이지 않는다
+    assert wait_until(lambda: s.prompt_box_ready() and json.loads(reg.read_text(encoding="utf-8"))["status"] == "idle")
     set_live(fake_config, s.session_id, "busy")       # 예: Code 탭에서 /compact 실행 중
     manager.agents._at = 0
     assert s.status() == tr.WORKING

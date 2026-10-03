@@ -45,7 +45,8 @@ def main(argv: list[str]) -> int:
     if len(argv) < 2:
         return 0
     try:
-        data = json.load(sys.stdin)
+        # 바이트로 읽어 UTF-8 로: Windows 에서 stdin 이 파이프면 ANSI 코드 페이지(cp949)로 읽혀 한글 경로·프롬프트가 깨진다
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace") or "null")
     except Exception:
         data = {}
     if not isinstance(data, dict):

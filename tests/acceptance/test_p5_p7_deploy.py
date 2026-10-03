@@ -114,7 +114,7 @@ def test_serve_refuses_busy_port_before_starting_sessions(tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
     try:
-        r = _serve_proc(tmp_path, f'port = {port}\nautostart = ["a"]\n[sessions]\na = "{ws}"\n')
+        r = _serve_proc(tmp_path, f'port = {port}\nautostart = ["a"]\n[sessions]\na = "{ws.as_posix()}"\n')
     finally:
         s.close()
     assert r.returncode == 2

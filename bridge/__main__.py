@@ -155,7 +155,7 @@ def cmd_service(args, cfg: BridgeConfig) -> int:
             print(f"등록: {p}")
         print(f"로그: {service.log_dir()}")
         if sys.platform == "win32":
-            print("로그온할 때 자동으로 뜹니다 (작업 스케줄러 \\VoiceBridge, 죽으면 1분 뒤 재시작).")
+            print("로그온할 때 자동으로 뜹니다 (작업 스케줄러 VoiceBridge-serve·tunnel, 꺼져 있으면 1분 안에 다시 시작).")
         elif sys.platform.startswith("linux"):
             print("로그아웃 뒤에도 돌게 하려면: loginctl enable-linger $USER")
         print("터널 주소가 정해지면(바뀌면) 알림이 뜹니다. 새 주소: voice-bridge url")

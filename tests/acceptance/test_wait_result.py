@@ -38,6 +38,7 @@ def test_long_task_keeps_waiting_until_done(manager):
 
 
 def test_approval_is_reported_once_then_waits(manager):
+    manager.config.wait_timeout = 6  # 훅 실행이 느린 환경(Windows CI)에서도 '즉시 알림' 판단이 흔들리지 않게
     started(manager)
     s = manager.get("테스트 세션")
     t = time.time()

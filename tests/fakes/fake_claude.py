@@ -47,7 +47,7 @@ REG = os.path.join(CFG, "fake_agents")
 os.makedirs(REG, exist_ok=True)
 SID = opt("--session-id") or str(uuid.uuid4())
 NAME = opt("--remote-control", "")
-SETTINGS = json.load(open(opt("--settings"))) if opt("--settings") else {}
+SETTINGS = json.load(open(opt("--settings"), encoding="utf-8")) if opt("--settings") else {}
 ATTACH = False
 MODE = opt("--permission-mode", "auto")
 MODE_TEXT = {"default": "⏸ manual mode on", "auto": "⏵⏵ auto mode on", "plan": "⏸ plan mode on",
@@ -71,17 +71,36 @@ def reg_path(sid):
     return os.path.join(REG, sid + ".json")
 
 
+def _retry(fn, tries=20):
+    """Windows 는 다른 프로세스가 연 파일을 바꾸거나 읽을 때 PermissionError 가 난다 → 잠깐 재시도."""
+    for i in range(tries):
+        try:
+            return fn()
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.02)
+
+
+def _read_json(path):
+    def go():
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    return _retry(go)
+
+
 def reg_load(sid):
     try:
-        return json.load(open(reg_path(sid)))
+        return _read_json(reg_path(sid))
     except (OSError, ValueError):
         return None
 
 
 def reg_save(entry):
-    tmp = reg_path(entry["sessionId"]) + ".tmp"
-    json.dump(entry, open(tmp, "w"), ensure_ascii=False)
-    os.replace(tmp, reg_path(entry["sessionId"]))
+    tmp = reg_path(entry["sessionId"]) + f".{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(entry, f, ensure_ascii=False)
+    _retry(lambda: os.replace(tmp, reg_path(entry["sessionId"])))
 
 
 def set_status(status):
@@ -123,13 +142,13 @@ def cmd_agents():
         if not f.endswith(".json"):
             continue
         try:
-            e = json.load(open(os.path.join(REG, f)))
+            e = _read_json(os.path.join(REG, f))
         except (OSError, ValueError):
             continue
         if e.get("kind") == "interactive" and e.get("pid") is not None and not alive(e["pid"]):
             continue  # 끝난 대화형 세션
         out_list.append(e)
-    print(json.dumps(out_list, ensure_ascii=False))
+    sys.stdout.buffer.write(json.dumps(out_list, ensure_ascii=False).encode("utf-8"))  # node 처럼 항상 UTF-8
 
 
 def cmd_bg():
@@ -159,7 +178,7 @@ def rec(d):
     d.setdefault("sessionId", SID)
     d.setdefault("cwd", CWD)
     last_uuid = d["uuid"]
-    with open(TRANSCRIPT, "a") as f:
+    with open(TRANSCRIPT, "a", encoding="utf-8") as f:
         f.write(json.dumps(d, ensure_ascii=False) + "\n")
 
 
@@ -167,7 +186,8 @@ def hook(event, **payload):
     for group in SETTINGS.get("hooks", {}).get(event, []):
         for h in group.get("hooks", []):
             data = {"hook_event_name": event, "session_id": SID, "cwd": CWD, **payload}
-            subprocess.run(h["command"], shell=True, input=json.dumps(data), text=True)
+            # 실제 claude 처럼 UTF-8 바이트로 (한글 그대로) 보낸다
+            subprocess.run(h["command"], shell=True, input=json.dumps(data, ensure_ascii=False).encode("utf-8"))
 
 
 def out(s):
@@ -316,8 +336,8 @@ def main():
     if "--bg" in args:
         return cmd_bg()
     if args[:1] == ["attach"]:
-        e = next((json.load(open(os.path.join(REG, f))) for f in os.listdir(REG)
-                  if f.endswith(".json") and json.load(open(os.path.join(REG, f))).get("id") == args[1]), None)
+        e = next((x for x in (_read_json(os.path.join(REG, f)) for f in os.listdir(REG) if f.endswith(".json"))
+                  if x.get("id") == args[1]), None)
         if e is None:
             print(f"no background session {args[1]}")
             sys.exit(1)

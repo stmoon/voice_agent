@@ -24,9 +24,11 @@ def _version() -> str:
         __version__ = version("voice-bridge")
     except PackageNotFoundError:
         __version__ = "0.0.0"
+    from .proc import run_quiet
+
     try:
-        h = subprocess.run(["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "--short", "HEAD"],
-                           capture_output=True, text=True, timeout=5).stdout.strip()
+        h = run_quiet(["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "--short", "HEAD"],
+                      text=True, timeout=5).stdout.strip()
     except Exception:
         h = ""
     return f"{__version__}+{h}" if h else __version__

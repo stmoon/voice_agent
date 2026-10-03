@@ -99,7 +99,10 @@ class BridgeConfig:
         if path.exists():
             data = tomllib.loads(path.read_text(encoding="utf-8"))
         if isinstance(data.get("claude_bin"), str):
-            data["claude_bin"] = shlex.split(data["claude_bin"])
+            if sys.platform == "win32":  # posix 규칙은 Windows 경로의 역슬래시를 지운다
+                data["claude_bin"] = [a.strip('"') for a in shlex.split(data["claude_bin"], posix=False)]
+            else:
+                data["claude_bin"] = shlex.split(data["claude_bin"])
         known = {f for f in cls.__dataclass_fields__} - {"source"}
         cfg = cls(**{k: v for k, v in data.items() if k in known})
         cfg.source = path
@@ -174,7 +177,7 @@ def claude_trusts(folder: str) -> bool | None:
     except Exception:
         return None
     p = Path(folder).expanduser().resolve()
-    for cand in (p, *p.parents):
-        if projects.get(str(cand), {}).get("hasTrustDialogAccepted"):
-            return True
-    return False
+    # Windows 는 키 표기가 여러 가지일 수 있다 (C:\\a\\b, C:/a/b, 대소문자) → 정규화해서 비교
+    norm = lambda k: k.replace("\\", "/").rstrip("/").casefold() if sys.platform == "win32" else k
+    trusted = {norm(k) for k, v in projects.items() if isinstance(v, dict) and v.get("hasTrustDialogAccepted")}
+    return any(norm(str(c)) in trusted or norm(c.as_posix()) in trusted for c in (p, *p.parents))

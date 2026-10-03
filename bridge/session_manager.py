@@ -338,7 +338,10 @@ class SessionManager:
                 "--settings", str(settings_file),
                 *self.config.claude_extra_args,
             ]
-            proc = PtyProcess(argv, cwd=cwd, env=self._env())
+            try:
+                proc = PtyProcess(argv, cwd=cwd, env=self._env())
+            except OSError as e:  # Windows: claude 를 찾지 못함·ConPTY 실패 → 서버는 살아 있어야 한다
+                raise BridgeError("start_failed", f"'{name}' 세션을 띄우지 못했습니다: {e}")
             s = Session(name=name, cwd=cwd, host=self.config.host_id, session_id=sid, proc=proc,
                         events_file=events_file, config_dir=self.config.claude_config_dir, kind=BRIDGE,
                         live=self.agents, quiet_window=self.config.quiet_window, quiet_rate=self.config.quiet_rate,
@@ -426,7 +429,12 @@ class SessionManager:
             raise BridgeError("session_exited", f"'{s.name}' 세션이 실행 중이 아닙니다 (멈췄거나 종료됨).")
         if s.proc is not None:
             s.proc.terminate()  # 스스로 끝난 이전 attach 정리
-        s.proc = PtyProcess([*self.config.claude_bin, "attach", s.agent_id], cwd=s.cwd or str(Path.home()), env=self._env())
+        try:
+            s.proc = PtyProcess([*self.config.claude_bin, "attach", s.agent_id], cwd=s.cwd or str(Path.home()),
+                                env=self._env())
+        except OSError as e:
+            s.proc = None
+            raise BridgeError("attach_failed", f"'{s.name}' 세션에 붙지 못했습니다: {e}")
         end = time.time() + min(self.config.ready_timeout, 20.0)
         while time.time() < end:
             time.sleep(0.3)

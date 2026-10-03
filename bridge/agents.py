@@ -20,10 +20,12 @@ LIVE_STATUS = {"idle": tr.IDLE, "busy": tr.WORKING, "waiting": tr.AWAITING_APPRO
 
 def list_agents(claude_bin: list[str], env: dict | None = None, timeout: float = 10.0) -> list[dict] | None:
     """실행 중인 세션 목록. 조회 실패 시 None (상태 판정은 transcript·훅으로 대체)."""
+    from .proc import run_quiet
+
     try:
-        r = subprocess.run([*claude_bin, "agents", "--json"], capture_output=True, text=True,
-                           timeout=timeout, env=env)
-    except (OSError, subprocess.TimeoutExpired):
+        # 창 없이(Windows 작업 스케줄러), claude.cmd 도 실행되게, UTF-8 로 (한국어 Windows 기본 cp949 로 읽으면 깨짐)
+        r = run_quiet([*claude_bin, "agents", "--json"], env=env, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError, ValueError):
         return None
     if r.returncode != 0:
         return None

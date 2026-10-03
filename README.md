@@ -34,9 +34,13 @@ py -3.12 tools\install.py
 
 - winget 설치 뒤에는 **새 PowerShell 창**에서 이어 한다 (PATH 반영). Claude Code(Windows판)는 Git for Windows 가 필요하다.
 - 토큰은 **자격 증명 관리자**에, 설정은 `%APPDATA%\voice-bridge\config.toml` 에 저장된다.
-- 자동 실행은 **작업 스케줄러**(`\VoiceBridge\serve`, `\VoiceBridge\tunnel`)로 로그온 때 창 없이 뜬다. 죽으면 1분 뒤 다시 뜬다
-  (작업 스케줄러 최소 간격). 로그는 `%LOCALAPPDATA%\voice-bridge\logs`, 주소가 바뀌면 트레이 알림이 뜬다.
+- 자동 실행은 **작업 스케줄러**(`VoiceBridge-serve`, `VoiceBridge-tunnel`)로 로그온 때 창 없이 뜨고, 1분마다 살아 있는지
+  확인해 꺼져 있으면 다시 띄운다. 로그는 `%LOCALAPPDATA%\voice-bridge\logs`, 주소가 바뀌면 트레이 알림이 뜬다.
 - 여러 줄 음성 명령은 한 줄로 합쳐 넣는다 (ConPTY 붙여넣기 동작 미확인).
+- **아직 Windows 실기에서 확인하지 못한 것**: claude 의 백그라운드 세션(`--bg`·`attach`·`agents`)과 Remote Control 이
+  Windows 에서도 macOS 와 같이 동작하는지, ConPTY 를 거친 Esc·Ctrl+U 입력, 작업 스케줄러 등록(일반 권한).
+  처음 설치하면 `voice-bridge service status` 와 로그를 확인하고, 휴대폰에서 세션 목록 → 명령 → 결과까지 한 번 돌려 본다.
+- 테스트를 Windows 에서 직접 돌릴 때는 `set PYTHONUTF8=1` 후 `python -m pytest -q` (CI 와 같은 조건).
 
 ### 2. 음성으로 쓸 세션 띄우기 (작업 폴더마다)
 

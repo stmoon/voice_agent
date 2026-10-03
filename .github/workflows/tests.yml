@@ -24,4 +24,5 @@ jobs:
         env:
           PYTHONUTF8: "1"
         # P0-3 은 개인 Claude Code 훅 설정(.claude/settings.json)이 있어야 하는 항목이라 CI 에서 제외
-        run: python -m pytest -q --deselect tests/acceptance/test_p0_infra.py::test_stop_hook_runs_make_verify
+        # basetemp: Windows 의 260자 경로 제한을 피하려고 짧은 임시 폴더 사용
+        run: python -m pytest -q --basetemp="${{ runner.temp }}/t" --deselect tests/acceptance/test_p0_infra.py::test_stop_hook_runs_make_verify

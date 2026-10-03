@@ -227,40 +227,55 @@ class _PosixPty:
 
 
 class _WinPty:  # pragma: no cover - Windows 전용 (CI 의 windows 러너에서 검증)
-    """pywinpty(ConPTY). read 는 내부 신호로 빈 문자열을 줄 수 있고, 닫히면 EOFError. write 실패는 OSError 로 바꾼다
-    (send_command 의 주입 실패 처리가 OSError 를 잡는다)."""
+    """pywinpty(ConPTY). 명령줄은 bridge.proc.pty_command 로 직접 만들어 저수준 PTY.spawn 에 넘긴다
+    (PtyProcess.spawn 의 list2cmdline 인용은 cmd.exe 규칙과 달라 claude.cmd·공백 경로에서 깨진다).
+    read 는 내부 신호로 빈 문자열을 줄 수 있고 닫히면 EOFError. 실패는 OSError 로 바꿔 올린다."""
 
     def __init__(self, owner: PtyProcess) -> None:
-        from winpty import PtyProcess as WinPtyProcess  # pywinpty
+        from winpty import PTY, PtyProcess as WinPtyProcess  # pywinpty
 
-        argv = resolve_argv(owner.argv, owner.env)
-        self._p = WinPtyProcess.spawn(argv, cwd=owner.cwd, env=owner.env, dimensions=(owner.rows, owner.cols))
+        from .proc import pty_command
+
+        appname, cmdline = pty_command(owner.argv, owner.env)
+        envstr = "\0".join(f"{k}={v}" for k, v in owner.env.items()) + "\0"
+        try:
+            pty = PTY(owner.cols, owner.rows)
+            pty.spawn(appname, cmdline=cmdline, cwd=owner.cwd, env=envstr)
+            self._p = WinPtyProcess(pty)
+        except Exception as e:
+            raise OSError(f"ConPTY 로 실행하지 못했습니다: {appname}{cmdline} ({e})") from e
         self.pid = self._p.pid
 
     def read(self) -> str | None:
         while True:
             try:
                 data = self._p.read(65536)
-            except EOFError:
+            except (EOFError, OSError):
                 return None
             if data:
                 return data
-            if not self._p.isalive():
+            if not self.is_alive():
                 return None
             time.sleep(0.01)
 
     def write(self, data: str) -> None:
         try:
             self._p.write(data)
-        except EOFError as e:
-            raise OSError(f"pty closed: {e}") from e
+        except Exception as e:  # EOFError(닫힘), WinptyError(파이프 오류)
+            raise OSError(f"pty write failed: {e}") from e
 
     def is_alive(self) -> bool:
-        return self._p.isalive()
+        try:
+            return self._p.isalive()
+        except Exception:
+            return False
 
     def terminate(self, timeout: float) -> None:
-        for fn in (lambda: self._p.terminate(force=True), lambda: self._p.close(force=True)):
-            try:
-                fn()
-            except Exception:
-                pass
+        try:
+            self._p.terminate(force=True)
+        except Exception:
+            pass
+        if self.is_alive() and self.pid:
+            from .proc import kill_tree
+
+            kill_tree(self.pid)  # cmd.exe 로 감싼 경우 node 같은 손자 프로세스까지
