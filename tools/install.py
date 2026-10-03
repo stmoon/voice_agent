@@ -22,8 +22,8 @@ DEFAULT_CONFIG = """\
 # voice-bridge 설정
 # host_id = "{host}"      # 생략하면 호스트명
 port = 8765
-# 터널 도메인 (tools/tunnel_setup.py 가 알려줌)
-allowed_hosts = []
+# 외부 주소 허용 (임시 터널은 주소가 바뀌므로 와일드카드). 고정 도메인을 쓰면 그 주소를 넣는다
+allowed_hosts = ["*.trycloudflare.com"]
 
 # 음성으로 띄울 수 있는 세션 프리셋: 이름 = 작업 폴더 (claude 로 한 번 열어 신뢰해 둔 폴더)
 [sessions]
@@ -74,12 +74,10 @@ def main(argv=None) -> int:
         print(f"[install] 기본 설정 생성: {cfg}")
 
     exe = venv_bin(prefix, "voice-bridge")
-    print("\n[install] 완료. 다음 단계:")
-    print(f"  1) {exe} token init                  # MCP 토큰 → OS 보안 저장소")
-    print(f"  2) {sys.executable} {REPO / 'tools' / 'tunnel_setup.py'} --domain <도메인>")
-    print(f"  3) {cfg} 에 세션 프리셋·allowed_hosts 입력")
-    print(f"  4) {exe} serve --start \"<세션이름>\"")
-    print("  5) 모바일 Claude 에 커넥터 등록 (token init 이 출력한 URL)")
+    print("\n[install] 완료. 다음 단계 (README '사용 방법' 참고):")
+    print(f"  1) {exe} token init          # 접속 토큰 → OS 보안 저장소")
+    print(f"  2) {exe} service install     # 브리지·터널 자동 실행 (macOS, cloudflared 필요)")
+    print(f"  3) {exe} url                 # 커넥터 주소 → claude.ai 설정 → 커넥터에 등록")
     return 0
 
 

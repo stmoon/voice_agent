@@ -1,6 +1,63 @@
 # voice-bridge
 
-휴대폰 음성 대화(모바일 Claude) → MCP → 원격 머신의 **Claude Code Remote Control 세션**에 명령 주입·결과 회수.
+휴대폰 Claude에게 **말로** 시키면, 내 컴퓨터의 Claude Code 세션이 그 일을 한다.
+
+## 사용 방법
+
+### 1. 처음 한 번 (컴퓨터에서)
+
+```bash
+brew install cloudflared python@3.12
+git clone https://github.com/stmoon/voice_agent.git && cd voice_agent
+python3.12 tools/install.py
+voice-bridge token init
+voice-bridge service install
+voice-bridge url
+```
+
+- `claude`가 설치돼 있고 로그인돼 있어야 한다 (`claude /login`).
+- `voice-bridge`는 설치가 끝날 때 알려 주는 경로로 실행한다 (예: `~/.local/share/voice-bridge/venv/bin/voice-bridge`).
+- `url`이 "터널이 없습니다"라고 하면 몇 초 뒤 다시 실행한다 (터널이 뜨는 중).
+- `url`이 출력한 주소를 **claude.ai → 설정 → 커넥터 → 사용자 지정 커넥터 추가**에 붙여 넣는다.
+  주소에 비밀 토큰이 들어 있으니 다른 곳에 공유하지 않는다.
+
+### 2. 음성으로 쓸 세션 띄우기 (작업 폴더마다)
+
+```bash
+cd ~/Project/내프로젝트 && claude --bg -n "이름" --remote-control "이름" --permission-mode default
+```
+
+- `"이름"`이 휴대폰에서 부르는 세션 이름이다.
+- 처음 쓰는 폴더면 먼저 그 폴더에서 `claude`를 한 번 실행해 "신뢰"를 고른다.
+- `--permission-mode default`를 빼면 목록에는 보여도 명령은 거부된다 (승인 없이 실행되는 모드 차단).
+
+### 3. 휴대폰에서 말하기
+
+새 대화를 열고 입력창의 커넥터 메뉴에서 이 커넥터를 켠 뒤:
+
+| 말하기 | 결과 |
+|---|---|
+| "음성 브리지 세션 목록 보여줘" | 세션 목록 (명령 가능 / 보기 전용) |
+| "○○ 세션으로 하자" → "응" | 그 세션으로 고정 |
+| "테스트 돌려줘" | 명령 실행 시작 |
+| "어떻게 됐어?" | 결과 요약 (자동으로 알려 주지 않으니 물어본다) |
+| "멈춰" | 작업 중단 |
+
+파일 수정 같은 작업은 "승인이 필요합니다"라고 알려 준다 → **휴대폰 Code 탭**에서 직접 승인한다.
+
+### 문제가 생기면
+
+| 증상 | 할 일 |
+|---|---|
+| 맥에 "음성 브리지 주소가 바뀌었습니다" 알림 | `voice-bridge url` → 커넥터 주소를 새 주소로 교체 |
+| 휴대폰이 "도구가 연결되어 있지 않다"고 함 | 새 대화에서 커넥터를 켰는지, 커넥터를 등록한 계정이 맞는지 확인 |
+| 세션이 목록에 있는데 명령이 안 됨 | 목록이 알려 주는 이유 확인 (대부분 `--permission-mode default` 누락) |
+| 아예 응답이 없음 | `voice-bridge service status`, 로그는 `~/Library/Logs/voice-bridge/` |
+
+---
+
+## 자세한 내용
+
 요구사항·진행 현황의 기준 문서: 노션 「🔌 음성 대화 - Claude Code 연동 (MCP 브리지)」.
 
 ```
