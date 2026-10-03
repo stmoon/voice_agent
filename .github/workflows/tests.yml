@@ -14,15 +14,41 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: install
-        run: python -m pip install -e ".[dev]"
+        run: python -m pip install -e ".[dev]" pytest-github-actions-annotate-failures
       - name: test (가짜 claude, 실제 claude 가 필요한 live 테스트는 자동 skip)
         env:
           PYTHONUTF8: "1"
-        # P0-3 은 개인 Claude Code 훅 설정(.claude/settings.json)이 있어야 하는 항목이라 CI 에서 제외
         # basetemp: Windows 의 260자 경로 제한을 피하려고 짧은 임시 폴더 사용
-        run: python -m pytest -q --basetemp="${{ runner.temp }}/t" --deselect tests/acceptance/test_p0_infra.py::test_stop_hook_runs_make_verify
+        # P0-3 은 개인 Claude Code 훅 설정(.claude/settings.json)이 있어야 하는 항목이라 CI 에서 제외
+        run: >-
+          python -m pytest -q -rfE --junitxml=junit.xml --basetemp="${{ runner.temp }}/t"
+          --deselect tests/acceptance/test_p0_infra.py::test_stop_hook_runs_make_verify
+      - name: 실패 요약 (인증 없이 API 로 읽을 수 있는 공개 주석)
+        if: failure()
+        shell: python
+        run: |
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          def esc(s):
+              return s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+          p = Path("junit.xml")
+          if not p.exists():
+              print("::error title=no junit::pytest 가 junit.xml 을 만들지 못했습니다 (수집 단계 실패 가능)")
+          else:
+              bad = []
+              for tc in ET.parse(p).getroot().iter("testcase"):
+                  el = tc.find("failure")
+                  if el is None:
+                      el = tc.find("error")
+                  if el is not None:
+                      bad.append((f"{tc.get('classname')}.{tc.get('name')}", (el.get("message") or "") + "\n" + (el.text or "")))
+              print(f"::error title=failed {len(bad)}::" + esc("\n".join(n for n, _ in bad)[:4000]))
+              for name, text in bad[:9]:
+                  print(f"::error title={name[-120:]}::" + esc(text[-3000:]))
