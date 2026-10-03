@@ -64,7 +64,7 @@ def test_list_shows_bridge_background_and_desktop(manager, fake_config, workdir)
     b, w, v = by_name(lst, "테스트 세션"), by_name(lst, "위키"), by_name(lst, "voice_commander")
     assert b["commandable"] and b["kind_ko"] == "브리지 세션"
     assert w["commandable"] and w["kind_ko"] == "백그라운드 세션" and w["rc_url"] and w["status_ko"] == "대기"
-    assert not v["commandable"] and "Code 탭" in v["reason"]
+    assert not v["commandable"] and "--permission-mode default" in v["reason"]  # 음성용 세션 띄우는 법 안내
     assert by_name(lst, "테스트")["status_ko"] == "작업 중"  # 실시간 상태(busy)
     for d in lst:
         assert d["folder"] == str(workdir.resolve()) or d["folder"] == str(workdir)
@@ -245,11 +245,13 @@ def real_bg(live_workdir):
 @pytest.mark.req("P3-5")
 def test_live_list_matches_claude_agents(live_manager, real_bg):
     name, _ = real_bg
+    bridge_s = live_manager.start_session("vc-live")
     lst = wait_until(lambda: (x := live_manager.list_sessions()) and any(d["name"] == name for d in x) and x, timeout=20)
     assert lst, "백그라운드 세션이 목록에 없음"
     agents = _real_agents()
     assert {d["session_id"] for d in lst} == {a["sessionId"] for a in agents}
     assert by_name(lst, name)["kind"] == BACKGROUND
+    assert [d["kind"] for d in lst if d["session_id"] == bridge_s.session_id] == [BRIDGE]  # 중복 없이 bridge 로 한 번
     assert all(not d["commandable"] for d in lst if d["kind"] == DESKTOP)
 
 

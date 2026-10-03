@@ -210,19 +210,6 @@ def run_prompt(text):
             out("\r\n")
             return text  # 기록 없음 + 프롬프트 복원
         assistant([{"type": "text", "text": "THOUGHT"}], "end_turn")
-    elif "SLOW" in text:
-        tid = "toolu_" + uuid.uuid4().hex[:8]
-        assistant([{"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": "sleep 30"}}], "tool_use")
-        out("\r\n⏺ Bash(sleep 30)  esc to interrupt\r\n")
-        if wait_key(["\x1b"], 30, spinner=True):
-            rec({"type": "user", "message": {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": tid, "content": "interrupted", "is_error": True}]}})
-            rec({"type": "user", "message": {"role": "user", "content": [
-                {"type": "text", "text": "[Request interrupted by user]"}]}})
-            return
-        rec({"type": "user", "message": {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": tid, "content": "ok"}]}})
-        assistant([{"type": "text", "text": "SLOW DONE"}], "end_turn")
     elif "PERM" in text:
         tid = "toolu_" + uuid.uuid4().hex[:8]
         assistant([{"type": "text", "text": "파일을 지우겠습니다."},
@@ -236,6 +223,9 @@ def run_prompt(text):
         k = wait_key(["y", "\x1b"], 60)
         set_status("busy")
         if k == "y":
+            if "SLOW" in text:  # 승인 뒤 도구가 한동안 돈다 (실측: 그동안 claude agents 는 busy)
+                out("\r\n⏺ Bash(rm x)  esc to interrupt\r\n")
+                wait_key(["\x1b"], 4, spinner=True)
             rec({"type": "user", "message": {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": tid, "content": "removed"}]}})
             assistant([{"type": "text", "text": "APPROVED"}], "end_turn")
@@ -245,6 +235,19 @@ def run_prompt(text):
             rec({"type": "user", "message": {"role": "user", "content": [
                 {"type": "text", "text": "[Request interrupted by user for tool use]"}]}})
             return
+    elif "SLOW" in text:
+        tid = "toolu_" + uuid.uuid4().hex[:8]
+        assistant([{"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": "sleep 30"}}], "tool_use")
+        out("\r\n⏺ Bash(sleep 30)  esc to interrupt\r\n")
+        if wait_key(["\x1b"], 30, spinner=True):
+            rec({"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tid, "content": "interrupted", "is_error": True}]}})
+            rec({"type": "user", "message": {"role": "user", "content": [
+                {"type": "text", "text": "[Request interrupted by user]"}]}})
+            return
+        rec({"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tid, "content": "ok"}]}})
+        assistant([{"type": "text", "text": "SLOW DONE"}], "end_turn")
     else:
         assistant([{"type": "thinking", "thinking": ""}, {"type": "text", "text": "ECHO: " + text}], "end_turn")
     rec({"type": "system", "subtype": "turn_duration", "durationMs": 5})

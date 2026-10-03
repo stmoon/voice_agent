@@ -6,3 +6,4 @@ reports/
 .pytest_cache/
 build/
 *.egg-info/
+.claude/worktrees/

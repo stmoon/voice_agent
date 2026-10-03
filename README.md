@@ -44,6 +44,23 @@ allowed_hosts = ["macmini.bridge.example.com"]
 커넥터 URL: `https://<호스트ID>.bridge.<도메인>/t/<토큰>/mcp` (헤더를 못 넣는 커넥터용).
 헤더를 넣을 수 있으면 `Authorization: Bearer <토큰>` + `/mcp`. 현재 주소는 `voice-bridge url` 이 조립해 준다.
 
+### 음성으로 쓸 세션 만들기
+
+세 가지 종류가 목록(`list_sessions`)에 나온다.
+
+| 종류 | 만드는 법 | 음성 명령 |
+|---|---|---|
+| 브리지 세션 | `voice-bridge add "이름" 폴더 --start` (설정 프리셋) | 가능 |
+| 백그라운드 세션 | `cd 폴더 && claude --bg -n "이름" --remote-control "이름" --permission-mode default` | 가능 (RC 켜짐 + 승인 필요 모드일 때) |
+| 데스크톱 앱·터미널 세션 | Claude 데스크톱 앱 Code 탭 등 | 보기 전용 (입력 통로가 없음) |
+
+- 백그라운드 세션은 bridge 가 `claude attach <id>` 로 붙어 입력한다. 책상에서도 `claude attach <id>` 로 같은 세션을 쓸 수 있다
+  (여러 곳에서 동시에 붙어도 됨). bridge 가 떨어져도 세션은 계속 돈다. 멈춘(`claude stop`) 세션에는 붙지 않는다(붙으면 깨어나므로).
+- **`--permission-mode default` 를 꼭 붙일 것.** 이 머신의 기본 모드는 auto 라서, 빼면 목록에는 보이지만 명령 불가로 표시된다.
+- git 저장소 안의 백그라운드 세션은 파일을 고칠 때 `.claude/worktrees/<이름>` 작업 트리에서 고칠 수 있다(원본 폴더가 아님).
+- 실시간 상태(대기/작업 중/승인 대기)는 `claude agents --json` 의 idle/busy/waiting 을 따른다. 결과는 transcript 에서 읽는다.
+- 음성 명령에서 `!`(승인 없는 셸 실행)·`/`(슬래시 명령)로 시작하는 것과 제어문자는 받지 않는다.
+
 ### 자동 실행 (macOS)
 
 ```bash
@@ -73,7 +90,8 @@ voice-bridge service uninstall
   꺼진다. 자식 env 에서 세션 표식만 제거하고 `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` 을 준다.
 - **기동 대화상자**: 온보딩 안내("Try the new fullscreen renderer?" 등)는 Esc(=거절)로 닫는다.
   **폴더 신뢰 확인은 자동 수락하지 않는다** → `folder_not_trusted` 오류. 미리 그 폴더에서 claude 를 한 번 열어 신뢰할 것.
-  화면을 읽는 곳은 이 기동 단계뿐이고, 결과·상태는 transcript 로만 판단한다.
+  화면은 기동 대화상자 처리, 승인창 감지(주입 안전장치), `claude agents` 를 못 쓸 때의 대체 중단 판정에만 쓴다.
+  응답 내용은 transcript 에서만 읽는다.
 - **승인 대기 판별**: JSONL 만으로는 "도구 실행 중" 과 "승인 대기" 가 구분되지 않는다(둘 다 결과 없는 tool_use).
   bridge 가 `--settings` 로 PermissionRequest/Notification 훅을 심어 사이드카에 기록하고, 결과 없는 tool_use 이후
   권한 이벤트가 있으면 승인 대기로 본다. 훅은 아무것도 출력하지 않으므로 권한 결정에 관여하지 않는다.
@@ -90,7 +108,7 @@ voice-bridge service uninstall
   - 대응 3: 마지막 턴이 끝나지 않았는데 TUI 가 조용하면(4초간 출력 150자/초 미만, transcript 변화 없음) '중단됨'.
     실측 출력량: 작업 중 500~1100자/초(스피너), 대기 0~50자/초. **결과 없는 tool_use 가 있으면 이 규칙을 쓰지 않는다**
     (권한 대화상자도 화면이 정적이라 조용하다).
-- **주입 안전장치**: 화면 맨 뒤가 입력 대기 안내(`? for shortcuts`)가 아니고 확인·권한 대화상자(`Do you want to proceed?`,
+- **주입 안전장치**: 화면 맨 뒤가 입력 대기 표시(`? for shortcuts`, attach 화면은 `⏸ manual mode on`)가 아니고 확인·권한 대화상자(`Do you want to proceed?`,
   `Esc to cancel` 등)가 떠 있으면 주입을 거부한다(`not_at_prompt`). 대화상자에 명령+Enter 가 들어가면 기본 선택(승인)이
   눌릴 수 있기 때문.
 - **RC 연결 확인**: RC 가 붙으면 CLI 가 transcript 에 `system/bridge_status` 레코드로 Code 탭 세션 URL 을 남긴다.

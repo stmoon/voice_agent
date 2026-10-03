@@ -3,7 +3,7 @@
 - macOS·Linux: 표준 `pty` 모듈
 - Windows: pywinpty (ConPTY)
 
-화면 출력은 기동 단계의 대화상자 처리에만 쓴다. 결과 회수는 transcript(JSONL) 로 한다.
+화면 출력은 기동 대화상자 처리·승인창 감지(안전장치)·대체 중단 판정에만 쓴다. 결과 회수는 transcript(JSONL) 로 한다.
 """
 from __future__ import annotations
 

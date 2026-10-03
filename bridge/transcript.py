@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -79,11 +80,13 @@ def user_text(rec: dict) -> str | None:
     """사용자 '프롬프트' 레코드면 그 텍스트, 아니면 None (tool_result·메타·명령 출력 제외)."""
     if rec.get("type") != "user" or rec.get("isSidechain") or rec.get("isMeta") or rec.get("isCompactSummary"):
         return None
+    if (rec.get("origin") or {}).get("kind") not in (None, "human"):
+        return None  # 백그라운드 작업 알림(task-notification) 등 사람이 넣은 프롬프트가 아님
     blocks = _content_blocks(rec)
     if not blocks or any(b.get("type") == "tool_result" for b in blocks):
         return None
     text = "\n".join(b.get("text", "") for b in blocks if b.get("type") == "text")
-    if text.lstrip().startswith(("<command-", "<local-command", "<bash-", "<system-reminder")):
+    if text.lstrip().startswith(("<command-", "<local-command", "<bash-", "<system-reminder", "<task-notification")):
         return None
     return text
 
@@ -232,17 +235,32 @@ def session_status(records: list[dict], events: list[dict] | None = None) -> str
     return IDLE if st in (DONE, INTERRUPTED) else st
 
 
+_RC_OFF = re.compile(r"remote.?control.{0,20}(disconnect|inactive|stopped|ended|off\b)", re.I)
+
+
 def rc_url(records: list[dict]) -> str | None:
-    """Remote Control 이 붙으면 CLI 가 system/bridge_status 레코드에 Code 탭 세션 URL 을 남긴다 (실측 2.1.285)."""
+    """Remote Control 이 붙으면 CLI 가 system/bridge_status 레코드에 Code 탭 세션 URL 을 남긴다 (실측 2.1.285).
+    그 뒤에 RC 가 끊겼다는 system 레코드가 있으면 None."""
     for r in reversed(records):
-        if r.get("type") == "system" and r.get("subtype") == "bridge_status" and r.get("url"):
+        if r.get("type") != "system":
+            continue
+        if r.get("subtype") == "bridge_status" and r.get("url"):
             return r["url"]
+        if _RC_OFF.search(str(r.get("content") or "")):
+            return None
     return None
 
 
-def turn_after(records: list[dict], offset: int) -> Turn | None:
-    """offset(레코드 개수) 이후 처음 시작된 턴 = bridge 가 주입한 요청의 턴."""
-    for t in split_turns(records):
-        if t.prompt_index >= offset:
-            return t
-    return None
+def _norm(t: str) -> str:
+    return " ".join(t.split())
+
+
+def turn_after(records: list[dict], offset: int, text: str | None = None) -> Turn | None:
+    """offset(레코드 개수) 이후의 턴 = bridge 가 주입한 요청의 턴.
+    text 를 주면 그 프롬프트와 일치하는 첫 턴을 우선하고, 없으면 offset 이후 첫 턴."""
+    later = [t for t in split_turns(records) if t.prompt_index >= offset]
+    if text is not None:
+        for t in later:
+            if _norm(t.prompt) == _norm(text):
+                return t
+    return later[0] if later else None

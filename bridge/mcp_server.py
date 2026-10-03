@@ -11,18 +11,39 @@ from .auth import TokenAuthMiddleware
 from .config import BridgeConfig
 from .session_manager import BridgeError, SessionManager
 
+
+def _version() -> str:
+    """실행 중인 코드의 git 커밋 (예전 코드가 응답하는지 휴대폰에서도 알 수 있게)."""
+    import subprocess
+    from pathlib import Path
+
+    from . import __version__
+
+    try:
+        h = subprocess.run(["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "--short", "HEAD"],
+                           capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        h = ""
+    return f"{__version__}+{h}" if h else __version__
+
+
+BRIDGE_VERSION = _version()
+
 INSTRUCTIONS = """\
 이 서버는 한 머신의 Claude Code 세션에 명령을 넣고 결과를 받는다.
 세션 종류 (list_sessions 의 kind):
 - bridge: bridge 가 띄운 세션 — 명령 가능
-- background: 사용자가 claude --bg --remote-control 로 띄운 세션 — 명령 가능 (RC 켜짐 + 승인 필요 모드일 때)
-- desktop: 데스크톱 앱·다른 터미널 세션 — 보기 전용. 명령을 넣을 수 없으니 "Code 탭에서 직접 입력하세요" 라고 안내
+- background: 사용자가 claude --bg -n "이름" --remote-control "이름" --permission-mode default 로 띄운 세션 — 명령 가능
+- desktop: 데스크톱 앱·다른 터미널 세션 — 보기 전용. 명령을 넣을 수 없으니 reason 대로 안내
+목록을 읽어 줄 때는 명령 불가 세션도 이름과 reason 을 함께 짧게 알린다.
 규칙:
 1. 세션 지정은 사용자가 명시적으로 한다. 추론해서 고르지 말 것.
 2. list_sessions 로 후보를 보여주고 "○○ 세션, 폴더 △△ - 맞습니까?" 로 확인. 예 → select_session 으로 고정, 아니오 → 다시 조회.
 3. 고정 후에는 send_command / get_result 로만 진행. 세션 변경은 사용자가 다시 지정할 때만.
 4. send_command 가 받아들여지면 "시작했습니다" 라고 짧게 알린다. 거부되면 상태만 알리고 재시도·큐잉하지 말 것.
 5. get_result 가 '승인 대기' 면 "승인이 필요합니다. Code 탭에서 확인해 주세요" 라고 알릴 것. 대신 승인하지 않는다.
+   prompt_mismatch 가 있으면 결과를 확정하지 말고 Code 탭에서 확인하라고 안내한다.
+   '!' 나 '/' 로 시작하는 명령은 받지 않는다 (말로 풀어서 요청).
 6. 사용자가 "멈춰" 하면 interrupt.
 결과 보고는 음성용으로 짧게 요약한다.
 """
@@ -50,7 +71,7 @@ def build_mcp(manager: SessionManager) -> MCPServer:
         """이 머신의 모든 Claude Code 세션 (이름, 작업 폴더, 호스트명, 상태: 대기/작업 중/승인 대기, 종류, 명령 가능 여부)."""
         sessions = await call(manager.list_sessions)
         return {"ok": True, "host": manager.config.host_id, "sessions": sessions,
-                "presets": sorted(manager.config.sessions)}
+                "presets": sorted(manager.config.sessions), "bridge_version": BRIDGE_VERSION}
 
     @mcp.tool()
     async def select_session(name: str) -> dict:
