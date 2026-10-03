@@ -29,8 +29,24 @@ FORBIDDEN_ARGS = ("--dangerously-skip-permissions", "--allow-dangerously-skip-pe
 PERMISSION_MODES = ("default", "auto")
 
 
-def default_config_path() -> Path:
-    return Path(os.environ.get("VC_CONFIG") or Path.home() / ".config" / "voice-bridge" / "config.toml")
+def _win_dir(var: str, fallback: str) -> Path:
+    return Path(os.environ.get(var) or Path.home() / "AppData" / fallback)
+
+
+def default_config_path(platform: str = sys.platform) -> Path:
+    """설정 파일: macOS·Linux ~/.config/voice-bridge/config.toml, Windows %APPDATA%\\voice-bridge\\config.toml."""
+    if os.environ.get("VC_CONFIG"):
+        return Path(os.environ["VC_CONFIG"])
+    if platform == "win32":
+        return _win_dir("APPDATA", "Roaming") / "voice-bridge" / "config.toml"
+    return Path.home() / ".config" / "voice-bridge" / "config.toml"
+
+
+def default_state_dir(platform: str = sys.platform) -> Path:
+    """상태(훅 이벤트·터널 주소): macOS·Linux ~/.local/state/voice-bridge, Windows %LOCALAPPDATA%\\voice-bridge\\state."""
+    if platform == "win32":
+        return _win_dir("LOCALAPPDATA", "Local") / "voice-bridge" / "state"
+    return Path.home() / ".local" / "state" / "voice-bridge"
 
 
 def default_host_id() -> str:
@@ -42,7 +58,7 @@ class BridgeConfig:
     host_id: str = field(default_factory=default_host_id)
     bind: str = "127.0.0.1"
     port: int = 8765
-    state_dir: Path = field(default_factory=lambda: Path.home() / ".local" / "state" / "voice-bridge")
+    state_dir: Path = field(default_factory=default_state_dir)
     claude_bin: list[str] = field(default_factory=lambda: ["claude"])
     claude_extra_args: list[str] = field(default_factory=list)
     claude_config_dir: Path | None = None   # transcript 탐색 위치 (기본 ~/.claude)

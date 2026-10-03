@@ -153,8 +153,12 @@ def cmd_service(args, cfg: BridgeConfig) -> int:
     if args.action == "install":
         for p in service.install():
             print(f"등록: {p}")
-        print(f"로그: {service.LOG_DIR}")
-        print("터널 주소가 정해지면 맥 알림이 뜹니다. 새 주소: voice-bridge url")
+        print(f"로그: {service.log_dir()}")
+        if sys.platform == "win32":
+            print("로그온할 때 자동으로 뜹니다 (작업 스케줄러 \\VoiceBridge, 죽으면 1분 뒤 재시작).")
+        elif sys.platform.startswith("linux"):
+            print("로그아웃 뒤에도 돌게 하려면: loginctl enable-linger $USER")
+        print("터널 주소가 정해지면(바뀌면) 알림이 뜹니다. 새 주소: voice-bridge url")
     elif args.action == "uninstall":
         for p in service.uninstall():
             print(f"해제: {p}")
@@ -215,11 +219,21 @@ def cmd_info(args, cfg: BridgeConfig) -> int:
     return 0
 
 
+def _redirect_output(path: str) -> None:
+    """stdout·stderr 를 파일로 (Windows pythonw 는 콘솔이 없어 출력이 사라지고 print 가 실패할 수 있다)."""
+    from pathlib import Path
+
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    f = open(path, "a", encoding="utf-8", buffering=1)
+    sys.stdout = sys.stderr = f
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="voice-bridge")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("serve")
     s.add_argument("--start", action="append", help="기동할 프리셋 세션 이름 (반복 가능)")
+    s.add_argument("--log", help="출력을 이 파일에 덧붙임 (창 없이 도는 자동 실행용)")
     t = sub.add_parser("token")
     t.add_argument("action", choices=["init", "set-notion"])
     sub.add_parser("info")
@@ -229,10 +243,13 @@ def main(argv: list[str] | None = None) -> int:
     ad.add_argument("folder", help="작업 폴더")
     ad.add_argument("--autostart", action="store_true", help="브리지가 뜰 때 자동 기동")
     ad.add_argument("--start", action="store_true", help="실행 중인 브리지에 지금 바로 기동")
-    sub.add_parser("tunnel", help="cloudflared 임시 터널 실행 (주소 바뀌면 맥 알림)")
-    sv = sub.add_parser("service", help="자동 실행 (launchd) 등록·해제·상태")
+    tn = sub.add_parser("tunnel", help="cloudflared 임시 터널 실행 (주소가 바뀌면 알림)")
+    tn.add_argument("--log", help="출력을 이 파일에 덧붙임 (창 없이 도는 자동 실행용)")
+    sv = sub.add_parser("service", help="자동 실행 등록·해제·상태 (macOS launchd / Windows 작업 스케줄러 / Linux systemd)")
     sv.add_argument("action", choices=["install", "uninstall", "status"])
     args = p.parse_args(argv)
+    if getattr(args, "log", None):
+        _redirect_output(args.log)
     cfg = BridgeConfig.load()
     return {"serve": cmd_serve, "token": cmd_token, "info": cmd_info, "url": cmd_url, "add": cmd_add,
             "tunnel": cmd_tunnel, "service": cmd_service}[args.cmd](args, cfg)

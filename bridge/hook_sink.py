@@ -16,10 +16,14 @@ HOOK_EVENTS = ("SessionStart", "PermissionRequest", "Notification", "Stop", "Use
 
 
 def build_settings(python: str, events_file: str) -> dict:
-    # 세션 cwd 는 임의 폴더라 패키지 import 에 기대지 않고 이 파일을 직접 실행
-    import os
+    # 세션 cwd 는 임의 폴더라 패키지 import 에 기대지 않고 이 파일을 직접 실행.
+    # 경로는 '/' 로: Windows 의 cmd·Git Bash 어느 쪽이 훅을 실행해도 따옴표 안 역슬래시 해석 문제가 없다.
+    from pathlib import Path
 
-    cmd = f'"{python}" "{os.path.abspath(__file__)}" "{events_file}"'
+    def q(p) -> str:
+        return '"' + Path(p).absolute().as_posix() + '"'  # resolve() 는 venv 심볼릭 링크를 따라가므로 쓰지 않음
+
+    cmd = f"{q(python)} {q(__file__)} {q(events_file)}"
     return {"hooks": {ev: [{"hooks": [{"type": "command", "command": cmd}]}] for ev in HOOK_EVENTS}}
 
 

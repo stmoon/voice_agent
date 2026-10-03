@@ -1,0 +1,27 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install
+        run: python -m pip install -e ".[dev]"
+      - name: test (가짜 claude, 실제 claude 가 필요한 live 테스트는 자동 skip)
+        env:
+          PYTHONUTF8: "1"
+        # P0-3 은 개인 Claude Code 훅 설정(.claude/settings.json)이 있어야 하는 항목이라 CI 에서 제외
+        run: python -m pytest -q --deselect tests/acceptance/test_p0_infra.py::test_stop_hook_runs_make_verify

@@ -38,7 +38,11 @@ def default_prefix() -> Path:
 
 
 def config_path() -> Path:
-    return Path(os.environ.get("VC_CONFIG") or Path.home() / ".config" / "voice-bridge" / "config.toml")
+    """브리지와 같은 규칙 (macOS·Linux ~/.config/…, Windows %APPDATA%\\voice-bridge\\config.toml)."""
+    sys.path.insert(0, str(REPO))
+    from bridge.config import default_config_path  # 표준 라이브러리만 쓰는 모듈이라 설치 전에도 import 가능
+
+    return default_config_path()
 
 
 def venv_bin(prefix: Path, name: str) -> Path:
@@ -75,8 +79,10 @@ def main(argv=None) -> int:
 
     exe = venv_bin(prefix, "voice-bridge")
     print("\n[install] 완료. 다음 단계 (README '사용 방법' 참고):")
-    print(f"  1) {exe} token init          # 접속 토큰 → OS 보안 저장소")
-    print(f"  2) {exe} service install     # 브리지·터널 자동 실행 (macOS, cloudflared 필요)")
+    if os.name == "nt":
+        print("  0) winget install Cloudflare.cloudflared   # 없으면 (설치 뒤 새 터미널)")
+    print(f"  1) {exe} token init          # 접속 토큰 → OS 보안 저장소 (Windows: 자격 증명 관리자)")
+    print(f"  2) {exe} service install     # 브리지·터널 자동 실행 (macOS launchd / Windows 작업 스케줄러 / Linux systemd)")
     print(f"  3) {exe} url                 # 커넥터 주소 → claude.ai 설정 → 커넥터에 등록")
     return 0
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -39,6 +40,19 @@ _ANSI_RE = re.compile(
 
 def strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
+
+
+def resolve_argv(argv: list[str], env: dict[str, str] | None = None, platform: str = sys.platform,
+                 which=shutil.which) -> list[str]:
+    """Windows: 실행 파일을 PATH 에서 찾고, npm 설치본(claude.cmd 같은 배치 파일)은 cmd.exe /c 로 감싼다.
+    (ConPTY 는 배치 파일을 직접 띄우지 못한다.) 다른 OS 는 그대로."""
+    if platform != "win32":
+        return list(argv)
+    exe = which(argv[0], path=(env or os.environ).get("PATH")) or argv[0]
+    if exe.lower().endswith((".cmd", ".bat")):
+        comspec = (env or os.environ).get("COMSPEC", "cmd.exe")
+        return [comspec, "/c", exe, *argv[1:]]
+    return [exe, *argv[1:]]
 
 
 def child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -121,8 +135,11 @@ class PtyProcess:
         time.sleep(0.2)
 
     def send_prompt(self, text: str, clear_lines: int = 8) -> None:
-        """입력창을 비운 뒤 프롬프트 입력 + 제출. 여러 줄이면 bracketed paste 로 넣어 중간 줄바꿈이 제출되지 않게 한다."""
+        """입력창을 비운 뒤 프롬프트 입력 + 제출. 여러 줄이면 bracketed paste 로 넣어 중간 줄바꿈이 제출되지 않게 한다.
+        Windows(ConPTY)는 붙여넣기 시퀀스 전달이 확인되지 않아 줄바꿈을 공백으로 합친다 (중간 Enter 로 제출되는 것 방지)."""
         self.clear_input(clear_lines)
+        if "\n" in text and sys.platform == "win32":
+            text = " ".join(line.strip() for line in text.splitlines() if line.strip())
         if "\n" in text:
             self.write(PASTE_BEGIN + text + PASTE_END)
         else:
@@ -209,26 +226,41 @@ class _PosixPty:
             pass
 
 
-class _WinPty:  # pragma: no cover - Windows 전용
+class _WinPty:  # pragma: no cover - Windows 전용 (CI 의 windows 러너에서 검증)
+    """pywinpty(ConPTY). read 는 내부 신호로 빈 문자열을 줄 수 있고, 닫히면 EOFError. write 실패는 OSError 로 바꾼다
+    (send_command 의 주입 실패 처리가 OSError 를 잡는다)."""
+
     def __init__(self, owner: PtyProcess) -> None:
         from winpty import PtyProcess as WinPtyProcess  # pywinpty
 
-        self._p = WinPtyProcess.spawn(
-            owner.argv, cwd=owner.cwd, env=owner.env, dimensions=(owner.rows, owner.cols)
-        )
+        argv = resolve_argv(owner.argv, owner.env)
+        self._p = WinPtyProcess.spawn(argv, cwd=owner.cwd, env=owner.env, dimensions=(owner.rows, owner.cols))
         self.pid = self._p.pid
 
     def read(self) -> str | None:
-        try:
-            return self._p.read(65536)
-        except EOFError:
-            return None
+        while True:
+            try:
+                data = self._p.read(65536)
+            except EOFError:
+                return None
+            if data:
+                return data
+            if not self._p.isalive():
+                return None
+            time.sleep(0.01)
 
     def write(self, data: str) -> None:
-        self._p.write(data)
+        try:
+            self._p.write(data)
+        except EOFError as e:
+            raise OSError(f"pty closed: {e}") from e
 
     def is_alive(self) -> bool:
         return self._p.isalive()
 
     def terminate(self, timeout: float) -> None:
-        self._p.terminate(force=True)
+        for fn in (lambda: self._p.terminate(force=True), lambda: self._p.close(force=True)):
+            try:
+                fn()
+            except Exception:
+                pass

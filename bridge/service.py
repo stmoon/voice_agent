@@ -1,13 +1,16 @@
-"""자동 실행 등록 (macOS launchd LaunchAgent).
+"""자동 실행 등록: 로그인하면 브리지·터널이 뜨고, 죽으면 다시 띄운다.
 
-    voice-bridge service install     브리지·터널을 로그인 시 자동 실행 + 죽으면 재시작
+    voice-bridge service install     등록 + 바로 시작
     voice-bridge service uninstall   해제
     voice-bridge service status      실행 상태
 
-두 개의 에이전트:
-- com.voicebridge.serve  : voice-bridge serve
-- com.voicebridge.tunnel : voice-bridge tunnel (cloudflared 임시 터널 + 주소 바뀌면 맥 알림)
-로그: ~/Library/Logs/voice-bridge/{serve,tunnel}.log
+두 개의 작업: serve (voice-bridge serve), tunnel (cloudflared 임시 터널 + 주소가 바뀌면 알림)
+
+| OS | 방식 | 재시작 | 로그 |
+|---|---|---|---|
+| macOS | launchd LaunchAgent (com.voicebridge.*) | 10초 뒤 | ~/Library/Logs/voice-bridge/ |
+| Windows | 작업 스케줄러 \\VoiceBridge\\{serve,tunnel} (로그온 트리거, pythonw 로 창 없이) | 1분 뒤(작업 스케줄러 최소값) | %LOCALAPPDATA%\\voice-bridge\\logs |
+| Linux | systemd 사용자 서비스 voice-bridge-{serve,tunnel} | 10초 뒤 | ~/.local/state/voice-bridge/logs |
 """
 from __future__ import annotations
 
@@ -22,8 +25,19 @@ LABEL_SERVE = "com.voicebridge.serve"
 LABEL_TUNNEL = "com.voicebridge.tunnel"
 LABELS = (LABEL_SERVE, LABEL_TUNNEL)
 
+def log_dir(platform: str = sys.platform) -> Path:
+    if platform == "darwin":
+        return Path.home() / "Library" / "Logs" / "voice-bridge"
+    if platform == "win32":
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "voice-bridge" / "logs"
+    return Path.home() / ".local" / "state" / "voice-bridge" / "logs"
+
+
 AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
-LOG_DIR = Path.home() / "Library" / "Logs" / "voice-bridge"
+LOG_DIR = log_dir()
+SYSTEMD_DIR = Path.home() / ".config" / "systemd" / "user"
+WIN_TASK_FOLDER = "VoiceBridge"
+COMMANDS = ("serve", "tunnel")
 TUNNEL_HOST_RE = re.compile(r"https://([a-z0-9-]+\.trycloudflare\.com)")
 QUICKTUNNEL_METRICS = "127.0.0.1:20241"
 
@@ -84,9 +98,7 @@ def _launchctl(*args: str, run=subprocess.run) -> subprocess.CompletedProcess:
     return run(["launchctl", *args], capture_output=True, text=True)
 
 
-def install(run=subprocess.run) -> list[str]:
-    if sys.platform != "darwin":
-        raise SystemExit("자동 실행 등록은 현재 macOS(launchd)만 지원합니다.")
+def _install_darwin(run=subprocess.run) -> list[str]:
     AGENTS_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     done = []
@@ -103,7 +115,7 @@ def install(run=subprocess.run) -> list[str]:
     return done
 
 
-def uninstall(run=subprocess.run) -> list[str]:
+def _uninstall_darwin(run=subprocess.run) -> list[str]:
     removed = []
     for label in LABELS:
         _launchctl("bootout", f"{_domain()}/{label}", run=run)
@@ -114,7 +126,7 @@ def uninstall(run=subprocess.run) -> list[str]:
     return removed
 
 
-def status(run=subprocess.run) -> dict[str, str]:
+def _status_darwin(run=subprocess.run) -> dict[str, str]:
     out = {}
     for label in LABELS:
         r = _launchctl("print", f"{_domain()}/{label}", run=run)
@@ -127,16 +139,206 @@ def status(run=subprocess.run) -> dict[str, str]:
     return out
 
 
+
+# ---------- Windows: 작업 스케줄러 ----------
+
+def pythonw_exe() -> str:
+    """콘솔 창 없이 실행할 파이썬 (venv 의 pythonw.exe)."""
+    w = Path(sys.executable).with_name("pythonw.exe")
+    return str(w if w.exists() else sys.executable)
+
+
+_WIN_ENTRY = "import sys; from bridge.__main__ import main; sys.exit(main(sys.argv[1:]))"
+
+
+def win_task_xml(cmd: str, user: str | None = None) -> str:
+    """로그온 시 시작, 실패하면 1분 뒤 재시작(작업 스케줄러 최소 간격), 실행 시간 제한 없음, 배터리여도 실행."""
+    from xml.sax.saxutils import escape
+
+    user = user or (f"{os.environ.get('USERDOMAIN')}\\{os.environ.get('USERNAME')}"
+                    if os.environ.get("USERNAME") else None)
+    log = log_dir("win32") / f"{cmd}.log"
+    args = f'-c "{_WIN_ENTRY}" {cmd} --log "{log}"'
+    uid = f"<UserId>{escape(user)}</UserId>" if user else ""
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>voice-bridge {cmd}</Description></RegistrationInfo>
+  <Triggers><LogonTrigger><Enabled>true</Enabled>{uid}</LogonTrigger></Triggers>
+  <Principals><Principal id="Author">{uid}<LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{escape(pythonw_exe())}</Command>
+      <Arguments>{escape(args)}</Arguments>
+      <WorkingDirectory>{escape(str(Path.home()))}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def _win_task(cmd: str) -> str:
+    return f"{WIN_TASK_FOLDER}\\{cmd}"
+
+
+def _install_windows(run=subprocess.run, state_dir: Path | None = None) -> list[str]:
+    from .config import default_state_dir
+
+    task_dir = (state_dir or default_state_dir("win32")) / "tasks"
+    task_dir.mkdir(parents=True, exist_ok=True)
+    log_dir("win32").mkdir(parents=True, exist_ok=True)
+    done = []
+    for cmd in COMMANDS:
+        xml = task_dir / f"{cmd}.xml"
+        xml.write_text(win_task_xml(cmd), encoding="utf-16")  # schtasks /XML 은 UTF-16 을 기대
+        r = run(["schtasks", "/Create", "/TN", _win_task(cmd), "/XML", str(xml), "/F"], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise SystemExit(f"작업 등록 실패({cmd}): {(r.stderr or r.stdout).strip()}")
+        run(["schtasks", "/Run", "/TN", _win_task(cmd)], capture_output=True, text=True)
+        done.append(_win_task(cmd))
+    return done
+
+
+def _uninstall_windows(run=subprocess.run) -> list[str]:
+    removed = []
+    for cmd in COMMANDS:
+        run(["schtasks", "/End", "/TN", _win_task(cmd)], capture_output=True, text=True)
+        r = run(["schtasks", "/Delete", "/TN", _win_task(cmd), "/F"], capture_output=True, text=True)
+        if r.returncode == 0:
+            removed.append(_win_task(cmd))
+    return removed
+
+
+def _status_windows(run=subprocess.run) -> dict[str, str]:
+    """PowerShell 의 State 는 OS 언어와 무관하게 영문(Running/Ready/Disabled)이라 schtasks 출력 대신 쓴다."""
+    ps = (f"Get-ScheduledTask -TaskPath '\\{WIN_TASK_FOLDER}\\' -ErrorAction SilentlyContinue | "
+          "ForEach-Object { $_.TaskName + '=' + $_.State }")
+    r = run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True)
+    found = dict(line.strip().split("=", 1) for line in (r.stdout or "").splitlines() if "=" in line)
+    return {_win_task(c): found.get(c, "등록 안 됨") for c in COMMANDS}
+
+
+# ---------- Linux: systemd 사용자 서비스 ----------
+
+def systemd_unit(cmd: str) -> str:
+    exe = bridge_exe()
+    return f"""[Unit]
+Description=voice-bridge {cmd}
+After=network-online.target
+
+[Service]
+ExecStart="{exe}" {cmd}
+Restart=always
+RestartSec=10
+Environment=PATH={service_path()}
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:{log_dir("linux") / f"{cmd}.log"}
+StandardError=append:{log_dir("linux") / f"{cmd}.log"}
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _unit(cmd: str) -> str:
+    return f"voice-bridge-{cmd}.service"
+
+
+def _install_linux(run=subprocess.run) -> list[str]:
+    SYSTEMD_DIR.mkdir(parents=True, exist_ok=True)
+    log_dir("linux").mkdir(parents=True, exist_ok=True)
+    done = []
+    for cmd in COMMANDS:
+        path = SYSTEMD_DIR / _unit(cmd)
+        path.write_text(systemd_unit(cmd), encoding="utf-8")
+        done.append(str(path))
+    run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True)
+    r = run(["systemctl", "--user", "enable", "--now", *[_unit(c) for c in COMMANDS]], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise SystemExit(f"systemd 등록 실패: {(r.stderr or r.stdout).strip()}")
+    return done
+
+
+def _uninstall_linux(run=subprocess.run) -> list[str]:
+    run(["systemctl", "--user", "disable", "--now", *[_unit(c) for c in COMMANDS]], capture_output=True, text=True)
+    removed = []
+    for cmd in COMMANDS:
+        path = SYSTEMD_DIR / _unit(cmd)
+        if path.exists():
+            path.unlink()
+            removed.append(str(path))
+    run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True)
+    return removed
+
+
+def _status_linux(run=subprocess.run) -> dict[str, str]:
+    out = {}
+    for cmd in COMMANDS:
+        r = run(["systemctl", "--user", "is-active", _unit(cmd)], capture_output=True, text=True)
+        out[_unit(cmd)] = (r.stdout or "").strip() or "등록 안 됨"
+    return out
+
+
+# ---------- 공통 입구 ----------
+
+def install(run=subprocess.run, platform: str | None = None) -> list[str]:
+    platform = platform or sys.platform
+    if platform == "darwin":
+        return _install_darwin(run)
+    if platform == "win32":
+        return _install_windows(run)
+    return _install_linux(run)
+
+
+def uninstall(run=subprocess.run, platform: str | None = None) -> list[str]:
+    platform = platform or sys.platform
+    if platform == "darwin":
+        return _uninstall_darwin(run)
+    if platform == "win32":
+        return _uninstall_windows(run)
+    return _uninstall_linux(run)
+
+
+def status(run=subprocess.run, platform: str | None = None) -> dict[str, str]:
+    platform = platform or sys.platform
+    if platform == "darwin":
+        return _status_darwin(run)
+    if platform == "win32":
+        return _status_windows(run)
+    return _status_linux(run)
+
+
 # ---------- 터널 ----------
 
-def notify(title: str, message: str, run=subprocess.run) -> None:
-    """맥 알림 센터에 표시. 실패해도 무시."""
-    if sys.platform != "darwin":
-        return
-    esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
+def notify(title: str, message: str, run=subprocess.run, popen=subprocess.Popen, platform: str | None = None) -> None:
+    """데스크톱 알림. 실패해도 무시. macOS 알림 센터 / Windows 트레이 풍선 알림 / Linux notify-send."""
+    platform = platform or sys.platform
     try:
-        run(["osascript", "-e", f'display notification "{esc(message)}" with title "{esc(title)}" sound name "Glass"'],
-            capture_output=True, timeout=10)
+        if platform == "darwin":
+            esc = lambda t: t.replace("\\", "\\\\").replace('"', '\\"')
+            run(["osascript", "-e", f'display notification "{esc(message)}" with title "{esc(title)}" sound name "Glass"'],
+                capture_output=True, timeout=10)
+        elif platform == "win32":
+            q = lambda t: t.replace("'", "''")
+            ps = ("Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; "
+                  "$n = New-Object System.Windows.Forms.NotifyIcon; $n.Icon = [System.Drawing.SystemIcons]::Information; "
+                  f"$n.BalloonTipTitle = '{q(title)}'; $n.BalloonTipText = '{q(message)}'; $n.Visible = $true; "
+                  "$n.ShowBalloonTip(15000); Start-Sleep -Seconds 15; $n.Dispose()")
+            popen(["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
+                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))   # 기다리지 않음
+        else:
+            import shutil
+
+            if shutil.which("notify-send"):
+                run(["notify-send", title, message], capture_output=True, timeout=10)
     except Exception:
         pass
 
@@ -151,7 +353,8 @@ def run_tunnel(port: int, state_dir: Path, popen=subprocess.Popen, run=subproces
     hf = host_file(state_dir)
     prev = hf.read_text().strip() if hf.exists() else None
     p = popen(["cloudflared", "tunnel", "--url", f"http://localhost:{port}", "--metrics", QUICKTUNNEL_METRICS],
-              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+              encoding="utf-8", errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     seen = False
     for line in p.stdout:
         out.write(line)
@@ -166,5 +369,5 @@ def run_tunnel(port: int, state_dir: Path, popen=subprocess.Popen, run=subproces
             out.write(f"[tunnel] 주소: https://{host}\n")
             if host != prev:
                 notify("음성 브리지 주소가 바뀌었습니다",
-                       f"{host} — 터미널에서 voice-bridge url 로 새 주소를 확인해 커넥터를 갱신하세요.", run=run)
+                       f"{host} — 터미널에서 voice-bridge url 로 새 주소를 확인해 커넥터를 갱신하세요.", run=run)  # noqa
     return p.wait()

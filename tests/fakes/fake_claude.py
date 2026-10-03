@@ -21,13 +21,18 @@ FAKE_NO_RC=1 RC 미연결, FAKE_AGENTS_FAIL=1 agents 조회 실패.
 import json
 import os
 import re
-import select
 import subprocess
 import sys
-import termios
 import time
-import tty
 import uuid
+
+WINDOWS = os.name == "nt"
+if WINDOWS:
+    import msvcrt
+else:
+    import select
+    import termios
+    import tty
 from datetime import datetime, timezone
 
 args = sys.argv[1:]
@@ -87,10 +92,26 @@ def set_status(status):
 
 
 def alive(pid):
+    """Windows 의 os.kill(pid, 0) 은 확인이 아니라 그 프로세스를 강제 종료한다 → ctypes 로 확인."""
     try:
-        os.kill(int(pid), 0)
+        pid = int(pid)
+    except (ValueError, TypeError):
+        return False
+    if WINDOWS:
+        import ctypes
+
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = k.GetExitCodeProcess(h, ctypes.byref(code))
+        k.CloseHandle(h)
+        return bool(ok) and code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
         return True
-    except (OSError, ValueError, TypeError):
+    except OSError:
         return False
 
 
@@ -173,10 +194,25 @@ def assistant(content, stop):
 
 
 def read_key(timeout):
+    if WINDOWS:  # ConPTY 입력은 콘솔 키 이벤트로 들어온다
+        end = time.time() + timeout
+        while time.time() < end:
+            if msvcrt.kbhit():
+                chars = []
+                while msvcrt.kbhit():
+                    chars.append(msvcrt.getwch())
+                return _win_keys("".join(chars))
+            time.sleep(0.01)
+        return None
     r, _, _ = select.select([sys.stdin], [], [], timeout)
     if not r:
         return None
     return os.read(sys.stdin.fileno(), 4096).decode("utf-8", "replace")
+
+
+def _win_keys(k):
+    """msvcrt 키 코드 → 터미널 바이트: Backspace \\x08 → \\x7f, Shift+Tab (\\x00|\\xe0)\\x0f → \\x1b[Z."""
+    return k.replace("\x00\x0f", "\x1b[Z").replace("\xe0\x0f", "\x1b[Z").replace("\x08", "\x7f")
 
 
 SPIN = "✻✶✳✢·"
@@ -273,7 +309,8 @@ def main():
     import signal
 
     signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))  # 종료돼도 finally(등록부 정리) 실행
-    signal.signal(signal.SIGHUP, lambda *a: sys.exit(0))
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, lambda *a: sys.exit(0))
     if args[:2] == ["agents", "--json"]:
         return cmd_agents()
     if "--bg" in args:
@@ -290,8 +327,10 @@ def main():
     else:
         setup_paths(os.getcwd(), SID)
     fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    tty.setraw(fd)
+    old = None
+    if not WINDOWS:
+        old = termios.tcgetattr(fd)
+        tty.setraw(fd)
     try:
         out(f"Claude Code (fake) · RC: {NAME}\r\n")
         if not ATTACH:
@@ -338,7 +377,8 @@ def main():
                 else:
                     buf += ch
     finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        if old is not None:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
         if ATTACH:
             set_status("idle")      # 떨어져도 백그라운드 세션은 남는다
         else:

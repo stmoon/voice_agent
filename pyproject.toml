@@ -2,7 +2,7 @@
 name = "voice-bridge"
 version = "0.1.0"
 description = "휴대폰 음성 대화 → Claude Code RC 세션 MCP 브리지"
-requires-python = ">=3.10"
+requires-python = ">=3.11"  # tomllib
 dependencies = [
     "mcp>=2.2",
     "keyring>=25",

@@ -21,6 +21,23 @@ voice-bridge url
 - `url`이 출력한 주소를 **claude.ai → 설정 → 커넥터 → 사용자 지정 커넥터 추가**에 붙여 넣는다.
   주소에 비밀 토큰이 들어 있으니 다른 곳에 공유하지 않는다.
 
+#### Windows에서는 (PowerShell)
+
+```powershell
+winget install Python.Python.3.12 Cloudflare.cloudflared Git.Git
+git clone https://github.com/stmoon/voice_agent.git; cd voice_agent
+py -3.12 tools\install.py
+& "$env:LOCALAPPDATA\voice-bridge\venv\Scripts\voice-bridge.exe" token init
+& "$env:LOCALAPPDATA\voice-bridge\venv\Scripts\voice-bridge.exe" service install
+& "$env:LOCALAPPDATA\voice-bridge\venv\Scripts\voice-bridge.exe" url
+```
+
+- winget 설치 뒤에는 **새 PowerShell 창**에서 이어 한다 (PATH 반영). Claude Code(Windows판)는 Git for Windows 가 필요하다.
+- 토큰은 **자격 증명 관리자**에, 설정은 `%APPDATA%\voice-bridge\config.toml` 에 저장된다.
+- 자동 실행은 **작업 스케줄러**(`\VoiceBridge\serve`, `\VoiceBridge\tunnel`)로 로그온 때 창 없이 뜬다. 죽으면 1분 뒤 다시 뜬다
+  (작업 스케줄러 최소 간격). 로그는 `%LOCALAPPDATA%\voice-bridge\logs`, 주소가 바뀌면 트레이 알림이 뜬다.
+- 여러 줄 음성 명령은 한 줄로 합쳐 넣는다 (ConPTY 붙여넣기 동작 미확인).
+
 ### 2. 음성으로 쓸 세션 띄우기 (작업 폴더마다)
 
 ```bash
