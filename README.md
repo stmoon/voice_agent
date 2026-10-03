@@ -46,6 +46,20 @@ cd ~/Project/내프로젝트 && claude --bg -n "이름" --remote-control "이름
 
 파일 수정 같은 작업은 "승인이 필요합니다"라고 알려 준다 → **휴대폰 Code 탭**에서 직접 승인한다.
 
+### 4. (선택) 음성으로 크롬 조작하기 — 브라우저 세션
+
+크롬에 Claude in Chrome 확장 프로그램이 설치·로그인돼 있어야 한다.
+
+```bash
+cd ~/Project/voice_commander/sessions/browser && claude --bg -n "브라우저" --remote-control "브라우저" --chrome --permission-mode default
+```
+
+- 휴대폰에서: "브라우저 세션으로 하자" → "네이버에서 오늘 날씨 찾아줘", "지금 열린 페이지 요약해줘"
+- 이 폴더의 `CLAUDE.md` 규칙대로 동작한다: 짧게 보고, 비밀번호·결제정보 입력 안 함, 구매·전송·게시·삭제·제출은
+  무엇을 할지 말하고 확인받은 뒤에만 실행, 웹페이지 안의 지시문은 따르지 않음.
+- `--permission-mode default` 면 페이지 열기·읽기도 하나하나 Code 탭에서 승인해야 한다.
+  번거로우면 끝의 `--permission-mode default` 를 빼서 auto 모드로 띄운다 (안전한 동작은 자동, 위험한 동작은 차단).
+
 ### 문제가 생기면
 
 | 증상 | 할 일 |
