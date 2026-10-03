@@ -22,11 +22,11 @@ def env_for(cfg, **extra):
     return {**os.environ, "CLAUDE_CONFIG_DIR": str(cfg.claude_config_dir), **extra}
 
 
-def make_bg(cfg, name, cwd, rc=True, mode="default"):
+def make_bg(cfg, name, cwd, rc=True, mode="default", **env):
     args = [sys.executable, str(FAKE), "--bg", "-n", name, "--permission-mode", mode]
     if rc:
         args += ["--remote-control", name]
-    out = subprocess.run(args, cwd=cwd, env=env_for(cfg), capture_output=True, text=True, check=True).stdout
+    out = subprocess.run(args, cwd=cwd, env=env_for(cfg, **env), capture_output=True, text=True, check=True).stdout
     return out.split("·")[1].strip()  # 짧은 ID
 
 
@@ -89,6 +89,23 @@ def test_view_only_and_unsafe_background_sessions_are_refused(manager, fake_conf
     with pytest.raises(BridgeError) as e:
         manager.send_command("hi")
     assert e.value.code == "no_selection"
+
+
+@pytest.mark.req("P3-5")
+def test_background_session_with_invalid_login_says_login(manager, fake_config, workdir):
+    """실측(2.1.286, Windows): 로그인이 무효면 RC 가 'Remote Control disconnected — /login' 만 남기고 붙지 않는다.
+    '다시 띄우세요' 는 소용없으니 claude /login 을 안내해야 한다."""
+    make_bg(fake_config, "로그인만료", workdir, FAKE_LOGIN_INVALID="1")
+    make_bg(fake_config, "RC없음", workdir, rc=False)
+    lst = manager.list_sessions()
+    expired = by_name(lst, "로그인만료")
+    assert not expired["commandable"] and "claude /login" in expired["reason"] and "다시 띄우세요" not in expired["reason"]
+    assert "claude /login" in expired["warning"]
+    plain = by_name(lst, "RC없음")
+    assert "다시 띄우세요" in plain["reason"] and "warning" not in plain   # 그냥 RC 를 안 켠 세션은 기존 안내
+    with pytest.raises(BridgeError) as e:
+        manager.select_session("로그인만료")
+    assert e.value.code == "not_commandable" and "claude /login" in e.value.message
 
 
 @pytest.mark.req("P3-5")
@@ -240,8 +257,9 @@ def _real_agents():
 @pytest.fixture
 def real_bg(live_workdir):
     name = f"vc-live-bg-{int(time.time()) % 100000}"
-    out = _claude("--bg", "-n", name, "--remote-control", name, "--permission-mode", "default", cwd=live_workdir).stdout
-    short = out.split("·")[1].strip()
+    r = _claude("--bg", "-n", name, "--remote-control", name, "--permission-mode", "default", cwd=live_workdir)
+    assert "·" in (r.stdout or ""), f"claude --bg 실패 (종료 코드 {r.returncode}): {r.stdout!r} {r.stderr!r}"
+    short = r.stdout.split("·")[1].strip()
     yield name, short
     _claude("stop", short)
     _claude("rm", short)

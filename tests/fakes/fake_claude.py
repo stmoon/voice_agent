@@ -16,7 +16,8 @@
 - `--bg -n 이름 --remote-control 이름`: 백그라운드 세션 등록 후 바로 종료 (transcript 에 권한 모드·RC 기록)
 - `attach <id>`: 백그라운드 세션에 붙은 화면. 대기 표시는 "⏸ manual mode on · ← for agents" (실측)
 환경변수 FAKE_DIALOG=1 기동 시 온보딩 대화상자, FAKE_TRUST=1 폴더 신뢰 대화상자, FAKE_NO_PERM_HOOKS=1 권한 훅 미발생,
-FAKE_NO_RC=1 RC 미연결, FAKE_AGENTS_FAIL=1 agents 조회 실패, FAKE_OLD_CLI=1 오래된 CLI(2.1.131: agents --json 없음).
+FAKE_NO_RC=1 RC 미연결, FAKE_AGENTS_FAIL=1 agents 조회 실패, FAKE_OLD_CLI=1 오래된 CLI(2.1.131: agents --json 없음),
+FAKE_LOGIN_INVALID=1 로그인 무효 (RC 연결 실패 기록 + 모든 프롬프트가 401 합성 응답 — 실측 2.1.286).
 """
 import json
 import os
@@ -159,11 +160,23 @@ def cmd_bg():
     setup_paths(os.getcwd(), sid)
     rec({"type": "permission-mode", "permissionMode": opt("--permission-mode", "default")})
     if "--remote-control" in args and os.environ.get("FAKE_NO_RC") != "1":
-        rec({"type": "system", "subtype": "bridge_status", "url": f"https://claude.ai/code/session_fake{short}"})
+        rc_record(short)
     reg_save({"id": short, "cwd": CWD, "kind": "background", "sessionId": sid, "name": name or short,
               "status": "idle", "state": "blocked", "startedAt": int(time.time() * 1000),
               "mode": opt("--permission-mode", "default")})
     print(f"backgrounded · {short}" + (f" · {name}" if name else "") + " (idle — send a prompt to start)")
+
+
+LOGIN_INVALID = os.environ.get("FAKE_LOGIN_INVALID") == "1"
+
+
+def rc_record(short):
+    """RC 연결 결과 기록. 로그인이 무효면 연결 실패 경고만 남는다 (실측 2.1.286, Windows)."""
+    if LOGIN_INVALID:
+        rec({"type": "system", "subtype": "informational", "level": "warning",
+             "content": "Remote Control disconnected — /login"})
+    else:
+        rec({"type": "system", "subtype": "bridge_status", "url": f"https://claude.ai/code/session_fake{short}"})
 
 
 def now():
@@ -327,7 +340,12 @@ def run_prompt(text):
     rec({"type": "user", "message": {"role": "user", "content": text}, "promptId": str(uuid.uuid4())})
     set_status("busy")
     hook("UserPromptSubmit", prompt=text)
-    if "THINK" in text:
+    if LOGIN_INVALID:  # 실측 2.1.286: API 가 401 로 거부 → CLI 가 만든 합성 응답
+        rec({"type": "assistant", "isApiErrorMessage": True, "error": "authentication_failed",
+             "message": {"id": "msg_" + uuid.uuid4().hex[:10], "role": "assistant", "model": "<synthetic>",
+                         "stop_reason": "stop_sequence", "content": [
+                             {"type": "text", "text": "Please run /login · API Error: 401 OAuth access token is invalid."}]}})
+    elif "THINK" in text:
         if wait_key(["\x1b"], 30, spinner=True):
             out("\r\n")
             return text  # 기록 없음 + 프롬프트 복원
@@ -431,7 +449,7 @@ def main():
                       "status": "idle", "startedAt": int(time.time() * 1000)})
             rec({"type": "permission-mode", "permissionMode": opt("--permission-mode", "auto")})
             if NAME and os.environ.get("FAKE_NO_RC") != "1":
-                rec({"type": "system", "subtype": "bridge_status", "url": f"https://claude.ai/code/session_fake{SID[:8]}"})
+                rc_record(SID[:8])
             hook("SessionStart", source="startup")
             if os.environ.get("FAKE_DIALOG") == "1":
                 dialog("Try the new fullscreen renderer?")

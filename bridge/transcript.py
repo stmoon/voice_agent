@@ -238,6 +238,12 @@ class Turn:
         return any(r.get("type") == "assistant" and (r.get("isApiErrorMessage")
                    or (r.get("message") or {}).get("model") == "<synthetic>") for r in self.records)
 
+    def auth_failed(self) -> bool:
+        """로그인이 만료·무효라 API 가 거부한 턴. 실측 2.1.286: isApiErrorMessage + "error": "authentication_failed",
+        본문 "Please run /login · API Error: 401 OAuth access token is invalid." """
+        return any(r.get("type") == "assistant" and r.get("error") == "authentication_failed" for r in self.records) \
+            or (self.is_error() and login_needed(self.final_text()))
+
 
 def split_turns(records: list[dict]) -> list[Turn]:
     turns: list[Turn] = []
@@ -299,6 +305,27 @@ def session_status(records: list[dict], events: list[dict] | None = None) -> str
 
 
 _RC_OFF = re.compile(r"remote.?control.{0,20}(disconnect|inactive|stopped|ended|off\b)", re.I)
+_LOGIN = re.compile(r"/login\b|not logged in|oauth (access )?token (is )?(invalid|expired)", re.I)
+
+
+def login_needed(text: str | None) -> bool:
+    """CLI 가 다시 로그인하라고 하는 문구인가 ('Remote Control disconnected — /login', 'Please run /login · ...')."""
+    return bool(text) and bool(_LOGIN.search(text))
+
+
+def rc_problem(records: list[dict]) -> str | None:
+    """Remote Control 이 끊겼다는 마지막 system 기록의 내용 (그 뒤에 다시 붙었으면 None).
+    실측 2.1.286: 로그인이 무효면 {"type":"system","subtype":"informational","level":"warning",
+    "content":"Remote Control disconnected — /login"} 가 남고 bridge_status 는 남지 않는다."""
+    for r in reversed(records):
+        if r.get("type") != "system":
+            continue
+        if r.get("subtype") == "bridge_status" and r.get("url"):
+            return None
+        content = str(r.get("content") or "")
+        if _RC_OFF.search(content):
+            return content
+    return None
 
 
 def rc_url(records: list[dict]) -> str | None:

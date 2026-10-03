@@ -115,6 +115,7 @@ rm -rf ~/.local/share/voice-bridge ~/.local/bin/voice-bridge ~/.config/voice-bri
 | 아무 응답이 없음 | `voice-bridge service status`, 로그 폴더, 알림(주소가 바뀌었는지) |
 | 세션이 "기동 실패" (폴더 신뢰) | 그 폴더에서 `claude` 를 한 번 실행해 신뢰 |
 | 목록이 비고 "세션 목록을 읽지 못했습니다" | `voice-bridge info` 로 claude 경로·버전 확인 (PATH, 2.1.285 이상) |
+| "claude 로그인이 만료됐거나 무효입니다" / 결과가 "Please run /login" | 그 컴퓨터에서 `claude /login`. `claude auth status` 가 로그인됨이라고 해도 토큰이 무효일 수 있다(실측). 디스크가 가득 차 있으면 갱신된 로그인 정보를 저장하지 못할 수 있으니 공간부터 확보 |
 
 ## 개발
 

@@ -209,3 +209,18 @@ def test_fallback_without_agents_never_mistakes_dialog_for_idle(manager, monkeyp
     assert e.value.code == "busy"
     s.proc.write("y")
     assert wait_until(lambda: _done(manager, r["request_id"]))["response"] == "APPROVED"
+
+
+@pytest.mark.req("P3-3")
+def test_invalid_login_result_tells_user_to_login(manager, monkeypatch):
+    """실측(2.1.286, Windows): 로그인 토큰이 무효면 모든 프롬프트가 CLI 의 합성 응답
+    'Please run /login · API Error: 401 ...' 로 끝난다 → 결과가 아니라 오류이고, 할 일(claude /login)을 알려야 한다."""
+    monkeypatch.setenv("FAKE_LOGIN_INVALID", "1")
+    manager.start_session("테스트 세션")
+    lst = manager.list_sessions()
+    assert "claude /login" in lst[0]["warning"]       # RC 가 로그인 문제로 안 붙었음을 목록에서 바로
+    manager.select_session("테스트 세션")              # 브리지 세션은 고정·주입은 된다 (결과에서 알림)
+    r = manager.send_command("hello")
+    d = wait_until(lambda: _done(manager, r["request_id"]))
+    assert d["status"] == tr.DONE and d["api_error"] is True
+    assert "Please run /login" in d["response"] and "claude /login" in d["message"]

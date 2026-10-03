@@ -71,6 +71,37 @@ def test_incremental_reader_matches_full_read(tmp_path):
         assert tr.JsonlReader().read(FIXTURES / f"{name}.jsonl") == tr.read_jsonl(FIXTURES / f"{name}.jsonl")
 
 
+RC_LOGIN = {"type": "system", "subtype": "informational", "level": "warning",
+            "content": "Remote Control disconnected — /login"}       # 실측 2.1.286 (로그인 무효)
+AUTH_FAILED = {"type": "assistant", "isApiErrorMessage": True, "error": "authentication_failed",
+               "message": {"role": "assistant", "model": "<synthetic>", "stop_reason": "stop_sequence", "content": [
+                   {"type": "text", "text": "Please run /login · API Error: 401 OAuth access token is invalid."}]}}
+
+
+@pytest.mark.req("P2-1")
+def test_rc_problem_and_login_detection():
+    bridge = {"type": "system", "subtype": "bridge_status", "url": "https://claude.ai/code/session_x"}
+    assert tr.rc_problem([RC_LOGIN]) == "Remote Control disconnected — /login" and tr.rc_url([RC_LOGIN]) is None
+    assert tr.rc_problem([RC_LOGIN, bridge]) is None          # 뒤에 다시 붙었으면 문제 아님
+    assert tr.rc_problem([bridge, RC_LOGIN]) == RC_LOGIN["content"]
+    assert tr.rc_problem([]) is None and tr.rc_problem([bridge]) is None
+    assert tr.login_needed(RC_LOGIN["content"]) and tr.login_needed("Please run /login · API Error: 401")
+    assert tr.login_needed("OAuth access token is invalid") and tr.login_needed("Not logged in · Run /login")
+    assert not tr.login_needed("Remote Control disconnected") and not tr.login_needed(None)
+    assert not tr.login_needed("loginform.tsx 를 고쳐줘")
+
+
+@pytest.mark.req("P2-2")
+def test_auth_failed_turn_is_error_not_result():
+    prompt = {"type": "user", "message": {"role": "user", "content": "hello"}}
+    turn, = tr.split_turns([prompt, AUTH_FAILED, {"type": "system", "subtype": "turn_duration"}])
+    assert turn.ended() and turn.is_error() and turn.auth_failed()
+    assert turn.final_text().startswith("Please run /login")
+    ok, = tr.split_turns([prompt, {"type": "assistant", "message": {"model": "m", "stop_reason": "end_turn", "content": [
+        {"type": "text", "text": "로그인 화면(/login)을 고쳤습니다"}]}}])
+    assert not ok.is_error() and not ok.auth_failed()   # 모델의 정상 응답에 /login 이 들어 있어도 오류 아님
+
+
 @pytest.mark.req("P2-1")
 def test_rc_url_in_file_matches_rc_url(tmp_path):
     f = tmp_path / "t.jsonl"

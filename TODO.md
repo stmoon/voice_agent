@@ -13,7 +13,9 @@
         한글 입력, 여러 줄 붙여넣기(중간 제출 없음) 확인. Esc 중단은 남음
   - [ ] 한글 폴더·세션 이름, npm 설치본(`claude.cmd`)과 공식 설치본(`claude.exe`) 둘 다 — 한글 이름·폴더, `claude.exe` 확인.
         `claude.cmd` 는 남음
-  - [ ] 휴대폰에서 세션 목록 → 명령 → 결과 → 승인 흐름
+  - [ ] 휴대폰에서 세션 목록 → 명령 → 결과 → 승인 흐름 — 브리지 쪽(`--remote-control` 세션 기동 → 명령 주입·Enter 제출 →
+        transcript 기록 → 결과 회수)은 확인. 그 PC 의 CLI 로그인이 무효(API 401)라 모델 응답·RC 연결·Esc 중단은
+        `claude /login` 뒤 `make verify-live` 로 다시 확인 (로그인 무효일 때 휴대폰에 `claude /login` 안내가 가는 것은 확인)
 - [ ] **auto 모드 세션**(`위키자동`)을 휴대폰에서 명령 → 승인 없이 결과가 오는지
 - [ ] **브라우저 세션**(`--chrome`)을 휴대폰에서 명령 → 크롬 조작·요약이 되는지, 확인 규칙(구매·전송 전 "진행할까요?")이 지켜지는지
 - [ ] 결과 즉시 보고: 50초를 넘는 작업에서 휴대폰 Claude 가 사용자에게 묻지 않고 계속 기다렸다가 보고하는지 (음성 모드 포함)
@@ -39,6 +41,7 @@
       ReadConsoleInputW 로 키를 읽게 바꿔 Windows 에서도 돈다)
 - [ ] `plan` 권한 모드 지원 여부 (승인창 문구 실측 필요)
 - [ ] RC 끊김 기록 문구(`Remote Control disconnected …`) 외 다른 끊김 형태가 있는지 확인
+      (확인된 형태: 로그인 무효 때 system/informational `Remote Control disconnected — /login` → 목록에 로그인 안내)
 - [ ] 노션 본문의 도구 표가 5개로 되어 있음 (실제 7개: + `start_session`, `get_result(wait)`) — 갱신 여부 결정
 
 ## 기록

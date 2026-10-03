@@ -56,6 +56,7 @@ class BridgeError(Exception):
 
 
 BG_LAUNCH = 'claude --bg -n "이름" --remote-control "이름"'
+LOGIN_FIX = "이 컴퓨터의 claude 로그인이 만료됐거나 무효입니다. 컴퓨터에서 `claude /login` 으로 다시 로그인해 주세요."
 
 
 def launch_hint(allowed_modes) -> str:
@@ -237,6 +238,9 @@ class Session:
         - 백그라운드 세션: Remote Control 이 켜져 있어야 함 (휴대폰 Code 탭에서 보고 승인할 수 있도록)"""
         records = records if records is not None else self.records()
         if self.kind == BACKGROUND and not tr.rc_url(records):
+            problem = tr.rc_problem(records)
+            if tr.login_needed(problem):  # 다시 띄워도 소용없다 (실측: 'Remote Control disconnected — /login')
+                return f"Remote Control 이 연결되지 않았습니다 ({problem}). {LOGIN_FIX}"
             return f"Remote Control 이 켜지지 않은 세션입니다. 다음처럼 다시 띄우세요: {launch_hint(self.allowed_modes)}"
         mode = self.permission_mode(records)
         if (mode is not None and mode not in self.allowed_modes) or (mode is None and self.kind == BACKGROUND):
@@ -287,6 +291,8 @@ class Session:
             d["failure"] = self.failure
         if self.warning:
             d["warning"] = self.warning
+        elif tr.login_needed(tr.rc_problem(records)):
+            d["warning"] = LOGIN_FIX
         return d
 
 
@@ -696,6 +702,8 @@ class SessionManager:
             d["response"] = turn.final_text()
             if turn.is_error():
                 d["api_error"] = True
+                if turn.auth_failed():
+                    d["message"] = LOGIN_FIX
         elif st == tr.AWAITING_APPROVAL:
             pend = turn.pending_tool_uses()
             d["pending_tools"] = [p["name"] for p in pend]
