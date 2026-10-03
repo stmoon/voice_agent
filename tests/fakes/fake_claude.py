@@ -47,6 +47,7 @@ ATTACH = False
 MODE = opt("--permission-mode", "auto")
 MODE_TEXT = {"default": "⏸ manual mode on", "auto": "⏵⏵ auto mode on", "plan": "⏸ plan mode on",
              "acceptEdits": "⏵⏵ accept edits on", "bypassPermissions": "⏵⏵ bypass permissions on"}
+CYCLE = ["default", "auto", "acceptEdits"]
 CWD = TRANSCRIPT = None
 last_uuid = None
 
@@ -156,7 +157,11 @@ def out(s):
 def idle_screen():
     set_status("idle")
     mode = MODE_TEXT.get(MODE, MODE)
-    footer = f"{mode} · ← for agents" if ATTACH else f"{mode} · ? for shortcuts"
+    # 실측: '? for shortcuts' 는 default 모드에서만, 그 밖엔 '(shift+tab to cycle)'. attach 화면의 비default 표시는 추정
+    if ATTACH:
+        footer = f"{mode} · ← for agents"
+    else:
+        footer = f"{mode} · ? for shortcuts" if MODE == "default" else f"{mode} (shift+tab to cycle)"
     out(f"\r\n\x1b[2m────────\x1b[0m\r\n❯ \r\n\x1b[2m{footer}\x1b[0m\r\n")
 
 
@@ -305,7 +310,15 @@ def main():
             if k is None:
                 continue
             k = k.replace("\x1b[200~", "").replace("\x1b[201~", "")
-            if k == "\x1b":
+            while "\x1b[Z" in k:  # Shift+Tab: 권한 모드 순환. transcript 엔 바로 기록하지 않음 (실측: 늦게 기록)
+                k = k.replace("\x1b[Z", "", 1)
+                MODE = CYCLE[(CYCLE.index(MODE) + 1) % len(CYCLE)] if MODE in CYCLE else "default"
+                e = reg_load(SID)
+                if e is not None:
+                    e["mode"] = MODE
+                    reg_save(e)
+                idle_screen()
+            if k == "\x1b" or not k:
                 continue
             for ch in k:
                 if ch == "\x15":            # Ctrl+U: 현재 줄(마지막 줄바꿈 뒤) 지우기

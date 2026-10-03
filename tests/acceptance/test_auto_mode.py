@@ -78,8 +78,9 @@ def test_config_never_allows_permission_bypass():
         BridgeConfig(session_permission_mode="acceptEdits")  # 허용 목록 밖
     with pytest.raises(ValueError):
         BridgeConfig(claude_extra_args=["--permission-mode", "auto"])  # 모드는 설정 항목으로만
-    assert BridgeConfig(allowed_permission_modes=["default", "auto", "acceptEdits"],
-                        session_permission_mode="acceptEdits").session_permission_mode == "acceptEdits"
+    for bad in ("acceptEdits", "plan"):
+        with pytest.raises(ValueError):
+            BridgeConfig(allowed_permission_modes=["default", bad])
 
 
 class _P:
@@ -94,8 +95,72 @@ class _P:
     ("❯ \n⏵⏵ auto mode on · ← for agents", True),
     ("❯ \n⏵⏵ auto mode on (shift+tab to cycle)", True),
     ("⏵⏵ auto mode on · ← for agents\nDo you want to proceed?\n❯ 1. Yes\nEsc to cancel", False),
+    ("⏸ manual mode on · ← for agents\n⏵⏵ accept edits on · ← for agents", False),   # 마지막 모드가 비허용
+    ("⏵⏵ bypass permissions on (shift+tab to cycle)", False),
 ])
 def test_prompt_box_ready_recognizes_auto_footer(screen, ok):
     s = Session.__new__(Session)
     s.proc = _P(screen)
+    s.allowed_modes = ("default", "auto")
     assert Session.prompt_box_ready(s) is ok
+
+
+# --- 모드 변경은 transcript 에 늦게 기록된다 (실측) → 화면 하단의 현재 모드로 막는다 ---
+
+@pytest.mark.req("P3-3")
+def test_mode_switched_on_screen_blocks_before_transcript_records_it(manager):
+    s = manager.start_session("테스트 세션")
+    manager.select_session("테스트 세션")
+    s.proc.write("\x1b[Z")            # default → auto (기록 없음)
+    assert wait_until(lambda: s.screen_mode() == "auto", timeout=5)
+    r = manager.send_command("ok in auto")
+    assert wait_until(lambda: done(manager, r["request_id"]))["response"] == "ECHO: ok in auto"
+    s.proc.write("\x1b[Z")            # auto → acceptEdits (기록 없음)
+    assert wait_until(lambda: s.screen_mode() == "acceptEdits", timeout=5)
+    assert s.permission_mode() in ("default", "auto")   # transcript 는 아직 모름
+    with pytest.raises(BridgeError) as e:
+        manager.send_command("edit everything")
+    assert e.value.code == "not_commandable" and "acceptEdits" in e.value.message
+    assert not s.prompt_box_ready()
+    s.proc.write("\x1b[Z")            # → default
+    assert wait_until(lambda: s.screen_mode() == "default", timeout=5)
+    r = manager.send_command("back")
+    assert wait_until(lambda: done(manager, r["request_id"]))["response"] == "ECHO: back"
+
+
+@pytest.mark.req("P3-6")
+def test_background_session_screen_mode_blocks(manager, fake_config, workdir):
+    short = make_bg(fake_config, "위키", workdir, mode="default")
+    for f in (fake_config.claude_config_dir / "fake_agents").glob("*.json"):   # 대기 중 Shift+Tab → acceptEdits
+        e = json.loads(f.read_text())
+        if e.get("id") == short:
+            e["mode"] = "acceptEdits"
+            f.write_text(json.dumps(e, ensure_ascii=False))
+    manager.list_sessions()
+    manager.select_session("위키")          # transcript 는 default 라 고정은 됨
+    s = manager.get("위키")
+    assert s.screen_mode() == "acceptEdits"
+    with pytest.raises(BridgeError) as e:
+        manager.send_command("hello")
+    assert e.value.code == "not_commandable"
+
+
+@pytest.mark.req("P3-5")
+def test_list_reports_permission_mode(manager, fake_config, workdir):
+    make_bg(fake_config, "자동", workdir, mode="auto")
+    make_bg(fake_config, "승인", workdir, mode="default")
+    lst = manager.list_sessions()
+    assert by_name(lst, "자동")["permission_mode"] == "auto" and by_name(lst, "자동")["permission_mode_ko"] == "자동(auto)"
+    assert by_name(lst, "승인")["permission_mode_ko"] == "승인 필요"
+
+
+@pytest.mark.req("P3-5")
+def test_launch_hint_follows_allowed_modes(fake_config, workdir):
+    fake_config.allowed_permission_modes = ["default"]
+    m = SessionManager(fake_config)
+    try:
+        make_bg(fake_config, "자동", workdir, mode="auto")
+        r = by_name(m.list_sessions(), "자동")["reason"]
+        assert "--permission-mode default" in r   # 안내대로 다시 띄우면 실제로 명령 가능한 세션이 됨
+    finally:
+        m.shutdown()

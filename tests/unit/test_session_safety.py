@@ -13,6 +13,7 @@ class StubProc:
 def box(screen):
     s = Session.__new__(Session)
     s.proc = StubProc(screen)
+    s.allowed_modes = ("default", "auto")
     return Session.prompt_box_ready(s)
 
 

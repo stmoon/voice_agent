@@ -22,12 +22,11 @@ from pathlib import Path
 # 음성 경로로 권한 우회 모드를 쓰지 않는다 (권한 모드는 아래 설정 항목으로만 정한다)
 FORBIDDEN_ARGS = ("--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--permission-mode")
 
-# 음성 명령을 받을 수 있는 권한 모드 후보. bypassPermissions(모든 권한 검사 끔)는 어떤 설정으로도 허용하지 않는다.
-#   default     : 위험한 작업마다 사람이 승인
-#   auto        : Claude 가 작업마다 위험도를 판단해 안전한 것은 자동 실행, 위험한 것은 차단 (2026-10-03 사용자 결정으로 기본 허용)
-#   plan        : 계획만 세우고 실행하지 않음
-#   acceptEdits : 파일 편집을 무조건 자동 승인 (기본 비허용)
-PERMISSION_MODES = ("default", "auto", "plan", "acceptEdits")
+# 음성 명령을 받을 수 있는 권한 모드 (2026-10-03 사용자 결정):
+#   default : 위험한 작업마다 사람이 승인
+#   auto    : Claude 가 작업마다 위험도를 판단해 안전한 것은 자동 실행, 위험한 것은 차단
+# acceptEdits(편집 무조건 승인)·plan(미검증)·bypassPermissions(모든 권한 검사 끔)는 어떤 설정으로도 허용하지 않는다.
+PERMISSION_MODES = ("default", "auto")
 
 
 def default_config_path() -> Path:

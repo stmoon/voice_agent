@@ -18,7 +18,7 @@ def test_child_env_drops_parent_session_markers(monkeypatch):
 
 
 def test_spawn_write_and_terminate(tmp_path):
-    p = PtyProcess([sys.executable, str(FAKE), "--remote-control", "t"], cwd=str(tmp_path),
+    p = PtyProcess([sys.executable, str(FAKE), "--remote-control", "t", "--permission-mode", "default"], cwd=str(tmp_path),
                    env=child_env({"CLAUDE_CONFIG_DIR": str(tmp_path / "cfg")}))
     assert wait_until(lambda: "for shortcuts" in p.screen(), timeout=10)
     m = p.mark()

@@ -115,9 +115,9 @@ allowed_hosts = ["macmini.bridge.example.com"]
 - 백그라운드 세션은 bridge 가 `claude attach <id>` 로 붙어 입력한다. 책상에서도 `claude attach <id>` 로 같은 세션을 쓸 수 있다
   (여러 곳에서 동시에 붙어도 됨). bridge 가 떨어져도 세션은 계속 돈다. 멈춘(`claude stop`) 세션에는 붙지 않는다(붙으면 깨어나므로).
 - **허용 권한 모드**: 기본은 `default`(작업마다 사람이 승인)와 `auto`(Claude 가 위험도를 판단해 안전한 것만 자동 실행).
-  `acceptEdits`·권한 우회(`bypassPermissions`)로 바뀐 세션에는 명령을 넣지 않는다. 설정으로 조정:
-  `allowed_permission_modes = ["default", "auto"]`, bridge 가 띄우는 세션의 모드는 `session_permission_mode = "default"`.
-  `bypassPermissions` 는 어떤 설정으로도 허용되지 않는다.
+  `acceptEdits`·`plan`·권한 우회(`bypassPermissions`)로 바뀐 세션에는 명령을 넣지 않는다(설정으로도 못 켬).
+  auto 를 빼려면 `allowed_permission_modes = ["default"]`, bridge 가 띄우는 세션의 모드는 `session_permission_mode`.
+  CLI 는 모드 변경을 transcript 에 늦게 기록하므로, 주입 직전 **화면 하단의 현재 모드 표시**로 한 번 더 확인한다.
 - git 저장소 안의 백그라운드 세션은 파일을 고칠 때 `.claude/worktrees/<이름>` 작업 트리에서 고칠 수 있다(원본 폴더가 아님).
 - 실시간 상태(대기/작업 중/승인 대기)는 `claude agents --json` 의 idle/busy/waiting 을 따른다. 결과는 transcript 에서 읽는다.
 - 음성 명령에서 `!`(승인 없는 셸 실행)·`/`(슬래시 명령)로 시작하는 것과 제어문자는 받지 않는다.

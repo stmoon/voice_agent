@@ -53,7 +53,17 @@ class BridgeError(Exception):
         return {"ok": False, "error": self.code, "message": self.message, **self.extra}
 
 
-BG_LAUNCH = 'claude --bg -n "이름" --remote-control "이름"'  # 승인 필요 모드로 쓰려면 --permission-mode default
+BG_LAUNCH = 'claude --bg -n "이름" --remote-control "이름"'
+
+
+def launch_hint(allowed_modes) -> str:
+    """음성용 백그라운드 세션을 띄우는 명령. 이 머신의 CLI 기본 모드(auto)가 허용 목록에 없으면 모드를 명시한다."""
+    allowed = list(allowed_modes)
+    return BG_LAUNCH if "auto" in allowed else f"{BG_LAUNCH} --permission-mode {allowed[0]}"
+
+
+MODE_KO = {"default": "승인 필요", "auto": "자동(auto)", "acceptEdits": "편집 자동 승인", "plan": "계획",
+           "bypassPermissions": "권한 우회"}
 
 
 def sanitize_command(text: str) -> str:
@@ -133,10 +143,26 @@ class Session:
         return snap is not None and not any(a.get("sessionId") == self.session_id for a in snap)
 
     def permission_mode(self, records: list[dict] | None = None) -> str | None:
+        """transcript 상 권한 모드: permission-mode 레코드와 사용자 프롬프트 레코드의 permissionMode 중 가장 최근 값.
+        주의: CLI 는 모드 변경을 늦게 기록한다(실측) → 주입 직전엔 screen_mode() 도 함께 본다."""
         for r in reversed(records if records is not None else self.records()):
             if r.get("type") == "permission-mode":
                 return r.get("permissionMode")
+            if r.get("type") == "user" and isinstance(r.get("permissionMode"), str):
+                return r["permissionMode"]
         return None
+
+    def screen_mode(self) -> str | None:
+        """화면 하단에 마지막으로 그려진 모드 표시 (지금 실제 모드). 표시가 없으면 None."""
+        if self.proc is None:
+            return None
+        scr = "".join(self.proc.screen().split()).lower()
+        best, mode = -1, None
+        for marker, m in _MODE_MARKERS.items():
+            at = scr.rfind(marker)
+            if at > best:
+                best, mode = at, m
+        return mode
 
     def transcript_age(self) -> float:
         p = self.transcript_path()
@@ -207,23 +233,29 @@ class Session:
         - 백그라운드 세션: Remote Control 이 켜져 있어야 함 (휴대폰 Code 탭에서 보고 승인할 수 있도록)"""
         records = records if records is not None else self.records()
         if self.kind == BACKGROUND and not tr.rc_url(records):
-            return f"Remote Control 이 켜지지 않은 세션입니다. 다음처럼 다시 띄우세요: {BG_LAUNCH}"
+            return f"Remote Control 이 켜지지 않은 세션입니다. 다음처럼 다시 띄우세요: {launch_hint(self.allowed_modes)}"
         mode = self.permission_mode(records)
         if (mode is not None and mode not in self.allowed_modes) or (mode is None and self.kind == BACKGROUND):
             allowed = "·".join(self.allowed_modes)
-            fix = f" 다음처럼 다시 띄우세요: {BG_LAUNCH}" if self.kind == BACKGROUND else " Code 탭에서 허용 모드로 되돌려 주세요."
+            fix = (f" 다음처럼 다시 띄우세요: {launch_hint(self.allowed_modes)}" if self.kind == BACKGROUND
+                   else " Code 탭에서 허용 모드로 되돌려 주세요.")
             return f"권한 모드가 '{mode or '알 수 없음'}' 입니다. 음성 명령은 {allowed} 모드 세션에만 넣습니다.{fix}"
         return None
 
     def prompt_box_ready(self) -> bool:
-        """안전장치: 화면 맨 뒤가 입력 대기 표시인지. 권한·확인 대화상자가 떠 있으면 False.
-        대화상자에 명령+Enter 를 넣으면 기본 선택(승인)이 눌릴 수 있으므로 주입 전에 반드시 확인한다.
-        대기 표시: 일반 화면 '? for shortcuts', attach 화면은 모드 표시 '⏸ manual mode on' / '⏵⏵ auto mode on' (실측)."""
+        """안전장치: 화면 맨 뒤가 입력 대기 표시이고, 지금 화면의 모드가 허용 모드인지.
+        - 권한·확인 대화상자가 떠 있으면 False (대화상자에 명령+Enter 가 들어가면 기본 선택=승인이 눌릴 수 있음)
+        - 대기 표시: 일반 화면 '? for shortcuts'(default 모드에서만 나옴), 그 밖엔 하단 모드 표시 (실측)
+        - 하단에 마지막으로 그려진 모드가 허용 모드가 아니면 False (CLI 는 모드 변경을 transcript 에 늦게 기록)"""
         if self.proc is None:
             return False
         scr = "".join(self.proc.screen().split()).lower()
-        idle_at = max(scr.rfind(k) for k in _IDLE_MARKERS)
         dialog_at = max(scr.rfind(k) for k in _DIALOG_MARKERS)
+        allowed_markers = ["forshortcuts"] + [k for k, m in _MODE_MARKERS.items() if m in self.allowed_modes]
+        idle_at = max(scr.rfind(k) for k in allowed_markers)
+        mode = self.screen_mode()
+        if mode is not None and mode not in self.allowed_modes:
+            return False
         return idle_at >= 0 and idle_at > dialog_at
 
     def info(self) -> dict:
@@ -242,6 +274,9 @@ class Session:
             "session_id": self.session_id,
             "rc_url": tr.rc_url(records),  # None 이면 RC 미연결 (Code 탭에 안 보임)
         }
+        mode = self.screen_mode() or self.permission_mode(records)
+        d["permission_mode"] = mode
+        d["permission_mode_ko"] = MODE_KO.get(mode, mode or "알 수 없음")
         if block:
             d["reason"] = block
         if self.failure:
@@ -337,7 +372,7 @@ class SessionManager:
                 mark = s.proc.mark()
                 continue
             started = any(e.get("hook_event_name") == "SessionStart" for e in s.events())
-            if started and "forshortcuts" in compact:
+            if started and any(k in compact for k in _ready_markers(s.allowed_modes)):
                 time.sleep(0.5)
                 if "entertoconfirm" in s.proc.screen_since(mark).replace(" ", "").lower():
                     continue
@@ -460,7 +495,7 @@ class SessionManager:
                 url = tr.rc_url(tr.read_jsonl(tr.find_transcript(a["sessionId"], self.config.claude_config_dir)))
                 reason = ("데스크톱 앱(또는 다른 터미널)이 입력을 쥐고 있어 음성 명령을 넣을 수 없습니다. "
                           + ("휴대폰 Code 탭에서 직접 입력하세요." if url else "Remote Control 도 꺼져 있어 휴대폰에서는 볼 수 없습니다.")
-                          + f" 음성으로 쓸 세션은 이렇게 띄우세요: {BG_LAUNCH}")
+                          + f" 음성으로 쓸 세션은 이렇게 띄우세요: {launch_hint(self.config.allowed_permission_modes)}")
                 out.append({
                     "name": a.get("name") or a["sessionId"][:8],
                     "folder": a.get("cwd"),
@@ -499,7 +534,8 @@ class SessionManager:
         for a in agents or []:
             if (a.get("name") == key or a["sessionId"] == key) and a.get("kind") != "background":
                 raise BridgeError("view_only", f"'{key}' 은 데스크톱 앱(또는 다른 터미널) 세션이라 음성 명령을 넣을 수 없습니다. "
-                                  f"Code 탭에서 직접 입력하거나, 음성으로 쓸 세션은 이렇게 띄우세요: {BG_LAUNCH}")
+                                  f"Code 탭에서 직접 입력하거나, 음성으로 쓸 세션은 이렇게 띄우세요: "
+                                  f"{launch_hint(self.config.allowed_permission_modes)}")
         raise BridgeError("no_session", f"'{key}' 세션이 없습니다.",
                           sessions=sorted({s.name for s in self._sessions.values()}))
 
@@ -540,6 +576,10 @@ class SessionManager:
             if st != tr.IDLE:
                 raise BridgeError("busy", f"'{s.name}' 세션이 {STATUS_KO.get(st, st)} 상태라 명령을 넣지 않았습니다.",
                                   session=s.info())
+            smode = s.screen_mode()
+            if smode is not None and smode not in s.allowed_modes:
+                raise BridgeError("not_commandable", f"'{s.name}' 세션의 현재 권한 모드가 '{smode}' 입니다. "
+                                  f"음성 명령은 {'·'.join(s.allowed_modes)} 모드에서만 넣습니다.", session=s.info())
             if not s.prompt_box_ready():
                 raise BridgeError("not_at_prompt", f"'{s.name}' 세션 화면에 확인·권한 대화상자가 떠 있어 명령을 넣지 않았습니다. "
                                   "Code 탭에서 확인해 주세요.", session=s.info())
@@ -621,8 +661,16 @@ class SessionManager:
         return {"ok": True, "session": s.name, "message": "중단 신호(Esc)를 보냈습니다."}
 
 
-# 입력 대기 화면 표시: 일반 화면 하단 '? for shortcuts', attach 화면은 모드 표시만 있음 (실측: manual / auto mode on)
-_IDLE_MARKERS = ("forshortcuts", "manualmodeon", "automodeon", "planmodeon", "accepteditson")
+# 하단 모드 표시 → 권한 모드 (실측: '⏸ manual mode on', '⏵⏵ auto mode on (shift+tab to cycle)')
+_MODE_MARKERS = {"manualmodeon": "default", "automodeon": "auto", "accepteditson": "acceptEdits",
+                 "planmodeon": "plan", "bypasspermissionson": "bypassPermissions"}
+# attach 준비 판정에 쓰는 표시 (어떤 모드든 화면이 그려졌는지). 주입 허용 여부는 prompt_box_ready 가 따로 판단
+_IDLE_MARKERS = ("forshortcuts", *_MODE_MARKERS)
+
+
+def _ready_markers(allowed_modes) -> list[str]:
+    """bridge 가 띄운 세션의 준비 판정: '? for shortcuts' 는 default 모드에서만 나오므로 허용 모드 표시도 인정."""
+    return ["forshortcuts"] + [k for k, m in _MODE_MARKERS.items() if m in allowed_modes]
 _DIALOG_MARKERS = ("doyouwanttoproceed", "doyouwanttomake", "doyouwanttocreate", "entertoconfirm", "esctocancel")
 _LIVE_TO_STATUS = {"idle": tr.IDLE, "busy": tr.WORKING, "waiting": tr.AWAITING_APPROVAL}
 
