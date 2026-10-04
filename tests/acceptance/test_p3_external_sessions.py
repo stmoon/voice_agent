@@ -241,28 +241,29 @@ def test_control_sequences_never_reach_session(manager):
 
 # ---------------- 실제 claude ----------------
 
-def _claude(*args, **kw):
+def _claude(claude_bin, *args, **kw):
     """실제 claude 실행: 브리지와 같은 방식 (UTF-8 로 읽음 — 한국어 Windows 기본 cp949 로 읽으면 '·' 가 깨진다,
     npm 설치본 claude.cmd 도 실행)."""
     from bridge.proc import run_quiet
     from bridge.pty_runner import child_env
 
-    return run_quiet(["claude", *args], env=child_env(), text=True, timeout=60, **kw)
+    return run_quiet([*claude_bin, *args], env=child_env(), text=True, timeout=60, **kw)
 
 
-def _real_agents():
-    return json.loads(_claude("agents", "--json").stdout or "[]")
+def _real_agents(claude_bin):
+    return json.loads(_claude(claude_bin, "agents", "--json").stdout or "[]")
 
 
 @pytest.fixture
-def real_bg(live_workdir):
+def real_bg(live_workdir, live_claude):
     name = f"vc-live-bg-{int(time.time()) % 100000}"
-    r = _claude("--bg", "-n", name, "--remote-control", name, "--permission-mode", "default", cwd=live_workdir)
+    r = _claude(live_claude, "--bg", "-n", name, "--remote-control", name, "--permission-mode", "default",
+                cwd=live_workdir)
     assert "·" in (r.stdout or ""), f"claude --bg 실패 (종료 코드 {r.returncode}): {r.stdout!r} {r.stderr!r}"
     short = r.stdout.split("·")[1].strip()
     yield name, short
-    _claude("stop", short)
-    _claude("rm", short)
+    _claude(live_claude, "stop", short)
+    _claude(live_claude, "rm", short)
 
 
 @pytest.mark.live
@@ -272,7 +273,7 @@ def test_live_list_matches_claude_agents(live_manager, real_bg):
     bridge_s = live_manager.start_session("vc-live")
     lst = wait_until(lambda: (x := live_manager.list_sessions()) and any(d["name"] == name for d in x) and x, timeout=20)
     assert lst, "백그라운드 세션이 목록에 없음"
-    agents = _real_agents()
+    agents = _real_agents(live_manager.config.claude_bin)
     assert {d["session_id"] for d in lst} == {a["sessionId"] for a in agents}
     assert by_name(lst, name)["kind"] == BACKGROUND
     assert [d["kind"] for d in lst if d["session_id"] == bridge_s.session_id] == [BRIDGE]  # 중복 없이 bridge 로 한 번
@@ -283,11 +284,12 @@ def test_live_list_matches_claude_agents(live_manager, real_bg):
 @pytest.mark.req("P3-6")
 def test_live_command_into_background_session(live_manager, real_bg):
     name, _ = real_bg
-    assert wait_until(lambda: by_name(live_manager.list_sessions(), name)["commandable"], timeout=30)
+    ok = wait_until(lambda: by_name(live_manager.list_sessions(), name)["commandable"], timeout=30)
+    assert ok, by_name(live_manager.list_sessions(), name)   # 실패하면 이유(reason·warning)가 보이게 (RC·로그인 등)
     live_manager.select_session(name)
     r = live_manager.send_command("Reply with exactly the word PONG and nothing else.")
     d = wait_until(lambda: (x := live_manager.get_result(r["request_id"]))["status"] == tr.DONE and x, timeout=120)
     assert d and "PONG" in d["response"] and "prompt_mismatch" not in d, d
     s = live_manager.get(name)
     live_manager.shutdown()
-    assert any(a["sessionId"] == s.session_id for a in _real_agents())  # 떨어져도 세션은 살아 있음
+    assert any(a["sessionId"] == s.session_id for a in _real_agents(live_manager.config.claude_bin))  # 떨어져도 세션은 살아 있음

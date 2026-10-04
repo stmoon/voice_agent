@@ -1,5 +1,4 @@
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -66,11 +65,24 @@ def live_workdir():
     return d
 
 
+@pytest.fixture(scope="session")
+def live_claude():
+    """실제 claude CLI: PATH 의 claude, 또는 VC_CLAUDE=<전체 경로>. 브리지와 같은 점검(경로·버전·세션 조회)을 한 번 하고,
+    문제가 있으면 무엇을 하면 되는지 알려 주며 실패한다."""
+    from bridge.agents import claude_doctor
+    from bridge.pty_runner import child_env
+
+    claude_bin = [os.environ["VC_CLAUDE"]] if os.environ.get("VC_CLAUDE") else ["claude"]
+    doc = claude_doctor(claude_bin, env=child_env())
+    if doc["problem"]:
+        pytest.fail(f"{doc['problem']}\n(live 테스트는 PATH 의 claude 를 쓴다. 다른 claude 는 VC_CLAUDE=<전체 경로> 로 지정)",
+                    pytrace=False)
+    return claude_bin
+
+
 @pytest.fixture
-def live_manager(tmp_path, live_workdir):
-    if not shutil.which("claude"):
-        pytest.fail("claude CLI 없음")
-    cfg = BridgeConfig(host_id="livehost", state_dir=tmp_path / "state",
+def live_manager(tmp_path, live_workdir, live_claude):
+    cfg = BridgeConfig(host_id="livehost", state_dir=tmp_path / "state", claude_bin=list(live_claude),
                        sessions={"vc-live": str(live_workdir)}, ready_timeout=90, inject_ack_timeout=30)
     m = SessionManager(cfg)
     yield m

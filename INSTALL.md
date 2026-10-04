@@ -122,4 +122,8 @@ rm -rf ~/.local/share/voice-bridge ~/.local/bin/voice-bridge ~/.config/voice-bri
 - 구성·설계 결정·실측 기록: [docs/DESIGN.md](docs/DESIGN.md)
 - 테스트: `make test` (가짜 claude), `make verify-live` (실제 claude, 로그인 필요). CI 는 macOS·Windows·Linux
 - Windows 에서 테스트를 직접 돌릴 때는 `set PYTHONUTF8=1` 후 `python -m pytest -q` (한국어 Windows 에서도 통과)
+- 실제 claude 테스트(live)는 PATH 의 claude(2.1.285 이상, 로그인)를 쓴다. 없거나 오래됐으면 이유를 알려 주며 실패한다.
+  다른 claude 는 `VC_CLAUDE=<전체 경로>` 로 지정. Windows PowerShell 에서는:
+  `$env:PYTHONUTF8=1; $env:VC_LIVE=1; .venv\Scripts\python -m pytest -m live -q --deselect tests/acceptance/test_p5_p7_deploy.py::test_mcp_call_through_external_domain`
+  (마지막 테스트는 외부 터널 주소 `VC_TUNNEL_URL` 이 있어야 한다)
 - 요구사항·진행 현황 기준 문서: 노션 「🔌 음성 대화 - Claude Code 연동 (MCP 브리지)」
