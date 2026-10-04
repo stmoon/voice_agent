@@ -4,18 +4,17 @@
 
 ## 확인 필요 (실기)
 
-- [ ] **Windows PC 에서 실제 사용** — 진행 중 (2026-10-04, Windows 11 한국어, claude 2.1.286).
-      CI Windows 실패 1건(터널 테스트의 가짜 Popen `_handle`)은 수정 → push 후 CI 재확인
+- [ ] **Windows PC 에서 실제 사용** — 진행 중 (2026-10-04, Windows 11 한국어, claude 2.1.289).
+      live 테스트 8개 전부 통과 (RC 연결, 명령 → 응답, Esc 중단: 작업 중·출력 중·생각 중, 백그라운드 세션 attach 명령, MCP 경유)
   - [ ] `scripts\install.ps1` 로 설치 → 작업 스케줄러 등록이 일반 권한으로 되는지, 창 없이 뜨는지, 꺼지면 1분 안에 다시 뜨는지
   - [x] `claude --bg` / `claude attach` / `claude agents --json` — 한글 이름·경로, 브리지의 attach 약 4초, 화면 하단 모드 판정,
-        attach 를 닫아도 세션 유지, `stop`·`rm` 확인 (Remote Control 연결은 아래 휴대폰 흐름에서)
-  - [ ] ConPTY 를 거친 Esc(중단)·Ctrl+U(입력창 비우기)·Enter — Ctrl+U/Backspace 지우기(한 줄·여러 줄·화면 폭을 넘는 줄),
-        한글 입력, 여러 줄 붙여넣기(중간 제출 없음) 확인. Esc 중단은 남음
+        attach 를 닫아도 세션 유지, `stop`·`rm`, RC 가 켜진 백그라운드 세션에 명령 → 응답
+  - [x] ConPTY 를 거친 Esc(중단)·Ctrl+U(입력창 비우기)·Enter — Ctrl+U/Backspace 지우기(한 줄·여러 줄·화면 폭을 넘는 줄),
+        한글 입력, 여러 줄 붙여넣기(중간 제출 없음), Esc 중단(작업 중·출력 중·생각 중 → 다음 명령이 이어 붙지 않음)
   - [ ] 한글 폴더·세션 이름, npm 설치본(`claude.cmd`)과 공식 설치본(`claude.exe`) 둘 다 — 한글 이름·폴더, `claude.exe` 확인.
         `claude.cmd` 는 남음
-  - [ ] 휴대폰에서 세션 목록 → 명령 → 결과 → 승인 흐름 — 브리지 쪽(`--remote-control` 세션 기동 → 명령 주입·Enter 제출 →
-        transcript 기록 → 결과 회수)은 확인. 그 PC 의 CLI 로그인이 무효(API 401)라 모델 응답·RC 연결·Esc 중단은
-        `claude /login` 뒤 `make verify-live` 로 다시 확인 (로그인 무효일 때 휴대폰에 `claude /login` 안내가 가는 것은 확인)
+  - [ ] 휴대폰에서 세션 목록 → 명령 → 결과 → 승인 흐름 — 브리지 쪽은 live 테스트로 확인. 실제 휴대폰·커넥터(터널)로는 남음
+        (로그인이 무효이면 휴대폰에 `claude /login` 안내가 가는 것도 확인)
 - [ ] **auto 모드 세션**(`위키자동`)을 휴대폰에서 명령 → 승인 없이 결과가 오는지
 - [ ] **브라우저 세션**(`--chrome`)을 휴대폰에서 명령 → 크롬 조작·요약이 되는지, 확인 규칙(구매·전송 전 "진행할까요?")이 지켜지는지
 - [ ] 결과 즉시 보고: 50초를 넘는 작업에서 휴대폰 Claude 가 사용자에게 묻지 않고 계속 기다렸다가 보고하는지 (음성 모드 포함)
@@ -37,8 +36,9 @@
 - [ ] 책상에서 `claude attach` 로 같은 세션에 붙어 입력 중일 때 음성 명령이 오면 입력창 비우기가 그 내용을 지울 수 있음
       → 입력 줄이 비어 있지 않으면 거부
 - [ ] 가짜 claude 의 attach 를 실제처럼 "세션 본체 + 붙는 클라이언트" 로 분리 (승인 뒤 백그라운드 진행 등 재현력)
-- [ ] Windows: ConPTY 출력량으로 `quiet_rate` 재측정(지금 값은 macOS 실측). (Shift+Tab 모드 전환 테스트는 가짜 claude 가
-      ReadConsoleInputW 로 키를 읽게 바꿔 Windows 에서도 돈다)
+- [ ] Windows: ConPTY 출력량으로 `quiet_rate` 재측정(지금 값은 macOS 실측). 작업 중은 실측 325~1300자/초(2.1.289)라
+      기준 150 보다 크다. 대기 중 값은 아직. (Shift+Tab 모드 전환 테스트는 가짜 claude 가 ReadConsoleInputW 로 키를 읽게 바꿔
+      Windows 에서도 돈다)
 - [ ] `plan` 권한 모드 지원 여부 (승인창 문구 실측 필요)
 - [ ] RC 끊김 기록 문구(`Remote Control disconnected …`) 외 다른 끊김 형태가 있는지 확인
       (확인된 형태: 로그인 무효 때 system/informational `Remote Control disconnected — /login` → 목록에 로그인 안내)

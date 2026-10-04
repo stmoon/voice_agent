@@ -62,8 +62,12 @@ def command_line(argv: list[str], env: dict | None = None) -> str:
 
 
 def run_quiet(argv: list[str], env: dict | None = None, **kw) -> subprocess.CompletedProcess:
-    """창 없이, 배치 파일도 실행되게, UTF-8 로 읽는 subprocess.run."""
+    """창 없이, 배치 파일도 실행되게, UTF-8 로 읽는 subprocess.run. 표준입력은 빈 입력(DEVNULL)을 준다:
+    부모의 표준입력이 유효하지 않으면(작업 스케줄러의 pythonw, pytest 등) claude 2.1.289 `--bg` 가 그것을 읽다가
+    "EBADF: bad file descriptor, read" 로 끝난다 (실측, Windows). 여기서 실행하는 명령은 입력이 필요 없다."""
     kw.setdefault("capture_output", True)
+    if "input" not in kw:
+        kw.setdefault("stdin", subprocess.DEVNULL)
     if kw.get("text") or "encoding" in kw:
         kw.setdefault("encoding", "utf-8")
         kw.setdefault("errors", "replace")

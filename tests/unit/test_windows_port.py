@@ -113,6 +113,17 @@ def test_install_dispatches_by_platform(monkeypatch):
     assert seen == ["win", "linux", "mac"]
 
 
+def test_run_quiet_gives_child_empty_stdin():
+    """부모의 표준입력을 물려주지 않는다: 그게 유효하지 않으면(작업 스케줄러·pytest) claude 2.1.289 --bg 가
+    읽다가 EBADF 로 끝났다 (실측). input= 을 주면 그것을 쓴다."""
+    from bridge import proc
+
+    r = proc.run_quiet([sys.executable, "-c", "import sys; print(repr(sys.stdin.read()))"], text=True, timeout=60)
+    assert r.returncode == 0 and r.stdout.strip() == "''"
+    r = proc.run_quiet([sys.executable, "-c", "import sys; print(sys.stdin.read())"], input="hi", text=True, timeout=60)
+    assert r.stdout.strip() == "hi"
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object")
 def test_kill_on_close_job_takes_child_down_with_it():
     """작업 스케줄러가 브리지를 강제 종료해도(= Job 핸들이 닫혀도) cloudflared 같은 자식이 남지 않아야 한다."""

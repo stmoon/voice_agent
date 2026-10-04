@@ -1,4 +1,5 @@
 """P1 PTY 주입 PoC 인수 테스트 — 실제 claude CLI 사용 (VC_LIVE=1, 로그인 필요)."""
+import re
 import time
 
 import pytest
@@ -7,6 +8,9 @@ from bridge import transcript as tr
 from tests.conftest import wait_until
 
 pytestmark = pytest.mark.live
+
+# 숫자만 있는 화면 줄 = 응답 출력이 시작됨 (생각 중 스피너 줄은 숫자만으로 되어 있지 않다)
+_NUMBER_LINE = re.compile(r"(?m)^\s*\d{1,4}\s*$")
 
 
 @pytest.mark.req("P1-1")
@@ -61,9 +65,11 @@ def test_escape_interrupts_while_streaming(live_manager):
     s = live_manager.start_session("vc-live")
     live_manager.select_session("vc-live")
     r = live_manager.send_command(
-        "Count from 1 to 600, each number on its own line, with no other text. Do not think, just start counting immediately."
+        "Count from 1 to 1500, each number on its own line, with no other text. Do not think, just start counting immediately."
     )
-    assert wait_until(lambda: "12" in s.proc.screen()[-3000:] and s.proc.output_rate(1) > 200, timeout=60)
+    # 실측(Windows, 2.1.289): TUI 가 바뀐 칸만 다시 그려서 '12' 같은 연속 문자열은 턴이 끝나 전체가 그려질 때에야 보였다
+    # (그땐 이미 끝나 중단할 게 없음). 숫자만 있는 줄은 출력이 시작되면 바로 늘어난다
+    assert wait_until(lambda: len(_NUMBER_LINE.findall(s.proc.screen()[-6000:])) >= 5, timeout=90)
     live_manager.interrupt()
     done = wait_until(lambda: (x := live_manager.get_result(r["request_id"]))["status"] != tr.WORKING and x, timeout=30)
     assert done and done["status"] == tr.INTERRUPTED, done
