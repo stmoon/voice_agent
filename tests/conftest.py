@@ -85,6 +85,7 @@ def live_manager(tmp_path, live_workdir, live_claude):
     cfg = BridgeConfig(host_id="livehost", state_dir=tmp_path / "state", claude_bin=list(live_claude),
                        sessions={"vc-live": str(live_workdir)}, ready_timeout=90, inject_ack_timeout=30)
     m = SessionManager(cfg)
+    m.remote_control = False  # RC 를 켤 때마다 claude.ai 세션 목록에 'vc-live' 가 쌓인다 → RC 를 확인하는 테스트에서만 켠다
     yield m
     m.shutdown()
 

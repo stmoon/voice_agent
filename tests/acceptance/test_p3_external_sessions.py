@@ -256,20 +256,29 @@ def _real_agents(claude_bin):
 
 @pytest.fixture
 def real_bg(live_workdir, live_claude):
-    name = f"vc-live-bg-{int(time.time()) % 100000}"
-    r = _claude(live_claude, "--bg", "-n", name, "--remote-control", name, "--permission-mode", "default",
-                cwd=live_workdir)
-    assert "·" in (r.stdout or ""), f"claude --bg 실패 (종료 코드 {r.returncode}): {r.stdout!r} {r.stderr!r}"
-    short = r.stdout.split("·")[1].strip()
-    yield name, short
-    _claude(live_claude, "stop", short)
-    _claude(live_claude, "rm", short)
+    """실제 백그라운드 세션을 만드는 함수. RC 는 rc=True 일 때만 켠다
+    (켤 때마다 claude.ai 세션 목록에 항목이 쌓인다). 끝나면 멈추고 지운다."""
+    made = []
+
+    def make(rc=False):
+        name = f"vc-live-bg-{int(time.time()) % 100000}"
+        r = _claude(live_claude, "--bg", "-n", name, *(("--remote-control", name) if rc else ()),
+                    "--permission-mode", "default", cwd=live_workdir)
+        assert "·" in (r.stdout or ""), f"claude --bg 실패 (종료 코드 {r.returncode}): {r.stdout!r} {r.stderr!r}"
+        short = r.stdout.split("·")[1].strip()
+        made.append(short)
+        return name, short
+
+    yield make
+    for short in made:
+        _claude(live_claude, "stop", short)
+        _claude(live_claude, "rm", short)
 
 
 @pytest.mark.live
 @pytest.mark.req("P3-5")
 def test_live_list_matches_claude_agents(live_manager, real_bg):
-    name, _ = real_bg
+    name, _ = real_bg()
     bridge_s = live_manager.start_session("vc-live")
     lst = wait_until(lambda: (x := live_manager.list_sessions()) and any(d["name"] == name for d in x) and x, timeout=20)
     assert lst, "백그라운드 세션이 목록에 없음"
@@ -283,7 +292,7 @@ def test_live_list_matches_claude_agents(live_manager, real_bg):
 @pytest.mark.live
 @pytest.mark.req("P3-6")
 def test_live_command_into_background_session(live_manager, real_bg):
-    name, _ = real_bg
+    name, _ = real_bg(rc=True)   # 백그라운드 세션은 RC 가 켜져야 명령을 받는다 (휴대폰에서 승인할 수 있게)
     ok = wait_until(lambda: by_name(live_manager.list_sessions(), name)["commandable"], timeout=30)
     assert ok, by_name(live_manager.list_sessions(), name)   # 실패하면 이유(reason·warning)가 보이게 (RC·로그인 등)
     live_manager.select_session(name)

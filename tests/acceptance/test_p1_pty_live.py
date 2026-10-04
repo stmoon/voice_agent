@@ -15,6 +15,7 @@ _NUMBER_LINE = re.compile(r"(?m)^\s*\d{1,4}\s*$")
 
 @pytest.mark.req("P1-1")
 def test_start_and_stop_real_rc_session(live_manager):
+    live_manager.remote_control = True   # RC 를 실제로 켜는 건 이 테스트만 (claude.ai 세션 목록에 하나 남는다)
     s = live_manager.start_session("vc-live")
     assert s.ready and s.proc.is_alive()
     argv = s.proc.argv

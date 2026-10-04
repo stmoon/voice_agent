@@ -224,3 +224,16 @@ def test_invalid_login_result_tells_user_to_login(manager, monkeypatch):
     d = wait_until(lambda: _done(manager, r["request_id"]))
     assert d["status"] == tr.DONE and d["api_error"] is True
     assert "Please run /login" in d["response"] and "claude /login" in d["message"]
+
+
+def test_bridge_session_without_remote_control(manager):
+    """실제 claude 테스트용: RC 를 끄면 --remote-control 대신 --name 으로 띄운다 (claude.ai 세션 목록에 쌓이지 않게).
+    브리지 세션은 RC 없이도 명령을 받는다. 기본은 켜짐."""
+    assert manager.remote_control is True
+    manager.remote_control = False
+    s = manager.start_session("테스트 세션")
+    argv = s.proc.argv
+    assert "--remote-control" not in argv and argv[argv.index("--name") + 1] == "테스트 세션"
+    manager.select_session("테스트 세션")
+    r = manager.send_command("hello")
+    assert wait_until(lambda: _done(manager, r["request_id"]))["response"] == "ECHO: hello"

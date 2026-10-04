@@ -305,6 +305,9 @@ class SessionManager:
         self._selected: str | None = None         # session_id
         self._lock = threading.RLock()
         self.agents = AgentsCache(config.claude_bin, env=self._env())
+        # 브리지 세션에 Remote Control 을 켠다 (휴대폰 Code 탭에서 보고 승인). 끄는 건 실제 claude 테스트용:
+        # 켤 때마다 claude.ai 세션 목록에 항목이 하나씩 쌓인다 (설정 파일로는 끌 수 없음 — 끄면 휴대폰에서 승인할 수 없다)
+        self.remote_control = True
 
     def _env(self) -> dict:
         extra = {}
@@ -349,7 +352,7 @@ class SessionManager:
             settings_file.write_text(json.dumps(build_settings(self.config.python, str(events_file))), encoding="utf-8")
             argv = [
                 *self.config.claude_bin,
-                "--remote-control", name,
+                *(("--remote-control", name) if self.remote_control else ("--name", name)),
                 "--session-id", sid,
                 "--permission-mode", self.config.session_permission_mode,
                 "--settings", str(settings_file),
